@@ -2,20 +2,27 @@ import { VirtualFileSystem } from "./memory-fs.js";
 import { installCompressedAssetFetch } from "./compressed-assets.js";
 import { readZipEntries } from "./zip.js";
 import { parseDiagnostics } from "./diagnostics.js";
+import { macroPackages } from "./macros.js";
 
 /**
  * This runtime's version. It ships inside a distribution, so it should always equal the
  * manifest's `toolchain.hostVersion` - if it does not, something is serving a mix of two
  * releases, and the symptoms are confusing (missing exports look like missing features).
  */
-export const HOST_VERSION = "0.2.1";
+export const HOST_VERSION = "0.3.0";
 
 /** Exports this runtime needs from the compiler bundle to offer its full feature set. */
 const EXPECTED_EXPORTS = [
   "runScala3CompilerSessionAsync",
   "linkScalaJSSessionAsync",
   "setScalaJSRuntimeIR",
+  "installScala3MacroRuntimeAsync",
+  "setScala3MacroArtifacts",
+  "makeScala3IRInput",
 ];
+
+/** Identifies the user's own sources as the place their macro implementations come from. */
+const USER_MACRO_ARTIFACT = "workspace-macros";
 
 const WORKSPACE_DIR = "/workspace";
 const OUTPUT_DIR = "/workspace/out";
@@ -36,6 +43,8 @@ export class ScalaToolchain {
   #manifest;
   #runtimeIR = null;
   #runtimeIRShared = false;
+  #macroRuntime = null;
+  #macroArtifacts = null;
   #stateless = false;
   // The compiler owns one virtual workspace, so compiles must not overlap - a background
   // warm-up would otherwise clear the directory a user's compile is reading.
@@ -84,6 +93,9 @@ export class ScalaToolchain {
 
     const toolchain = new ScalaToolchain({ compilerModule, manifest, fs, stateless });
     toolchain.runtimeIRUrl = resolve(manifest.runtimeIR);
+    // Only macro compiles need these, so they are recorded now and fetched on demand.
+    toolchain.compilerIRUrl = manifest.compilerIR ? resolve(manifest.compilerIR) : null;
+    toolchain.jszipWrapperUrl = new URL("../vendor/jszip-wrapper.js", resolve(manifest.compilerModule)).href;
 
     const { hostVersion } = manifest.toolchain ?? {};
     if (hostVersion && hostVersion !== HOST_VERSION) {
@@ -124,9 +136,18 @@ export class ScalaToolchain {
     });
     if (sourcePaths.length === 0) throw new Error("No sources to compile");
 
-    const args = ["-classpath", this.classpath, "-d", OUTPUT_DIR, ...options, ...sourcePaths];
+    // Setup arguments are the compiler session's key: hold them steady and a second compile
+    // reuses a warm compiler, so the sources are passed separately rather than appended.
+    const setupArgs = ["-classpath", this.classpath, "-d", OUTPUT_DIR, ...options];
+
+    const macros = this.supportsMacros ? macroPackages(Object.values(files)) : [];
+    if (macros.length > 0) await this.#armMacros(macros);
+    else this.#disarmMacros();
+
     const started = now();
-    const { result: exitCode, lines } = await captureConsole(() => this.#runCompiler(args));
+    const { result: exitCode, lines } = await captureConsole(() =>
+      this.#runCompiler(setupArgs, sourcePaths, macros.length > 0),
+    );
 
     const { diagnostics, errorCount, warningCount } = parseDiagnostics(lines);
     const irFiles = exitCode === 0
@@ -154,11 +175,71 @@ export class ScalaToolchain {
    * 15 MB `rt.jar` and reloads the standard library - so the warm one is used whenever the
    * distribution provides it.
    */
-  #runCompiler(args) {
+  #runCompiler(setupArgs, sourcePaths, macrosPresent) {
     if (!this.#stateless && typeof this.#compilerModule.runScala3CompilerSessionAsync === "function") {
-      return this.#compilerModule.runScala3CompilerSessionAsync(args);
+      return this.#compilerModule.runScala3CompilerSessionAsync(setupArgs, sourcePaths, macrosPresent);
     }
-    return this.#compilerModule.runScala3CompilerSJSAsync(args);
+    return this.#compilerModule.runScala3CompilerSJSAsync([...setupArgs, ...sourcePaths]);
+  }
+
+  /** Whether this build can expand quoted macros in the browser. */
+  get supportsMacros() {
+    return (
+      Boolean(this.compilerIRUrl) &&
+      typeof this.#compilerModule.installScala3MacroRuntimeAsync === "function" &&
+      typeof this.#compilerModule.setScala3MacroArtifacts === "function"
+    );
+  }
+
+  /**
+   * Make these packages' macros expandable.
+   *
+   * The implementations come from the compiler's own output directory, because the macro is
+   * compiled by the very run that then needs to call it: the compiler emits its `.sjsir`,
+   * interrupts itself, has us link it, and re-enters. Registering the output directory is
+   * therefore all the host has to say about where to look.
+   */
+  async #armMacros(packages) {
+    await this.#ensureMacroRuntime();
+    const key = packages.join(",");
+    if (this.#macroArtifacts === key) return;
+    this.#compilerModule.setScala3MacroArtifacts([
+      { id: USER_MACRO_ARTIFACT, macroPackages: packages, root: OUTPUT_DIR },
+    ]);
+    this.#macroArtifacts = key;
+  }
+
+  /** Tell the compiler no macro implementations are available, so it fails fast rather than
+   *  starting a relink loop for a program that has none. */
+  #disarmMacros() {
+    if (this.#macroArtifacts === null || !this.supportsMacros) return;
+    this.#compilerModule.setScala3MacroArtifacts([]);
+    this.#macroArtifacts = null;
+  }
+
+  /**
+   * Fetch the compiler's own IR and install the macro linker, once per page.
+   *
+   * This is the expensive half of macro support - 22 MB of IR, and a linked second copy of the
+   * compiler - which is why it happens here, on the first compile that needs it, and never for
+   * a program without macros.
+   */
+  #ensureMacroRuntime() {
+    if (!this.#macroRuntime) {
+      this.#macroRuntime = (async () => {
+        const bytes = await fetchBytes(this.compilerIRUrl);
+        const entries = await readZipEntries(bytes, (name) => name.endsWith(".sjsir"));
+        const irFiles = entries
+          .sort((left, right) => left.name.localeCompare(right.name))
+          .map((entry) => this.#compilerModule.makeScala3IRInput(`/compiler-ir/${entry.name}`, entry.bytes));
+        await this.#compilerModule.installScala3MacroRuntimeAsync(bytes, irFiles, this.jszipWrapperUrl);
+      })().catch((error) => {
+        // A failed install must not poison every later compile: let the next one retry.
+        this.#macroRuntime = null;
+        throw error;
+      });
+    }
+    return this.#macroRuntime;
   }
 
   /** Run work one at a time, in the order it arrived. */
@@ -206,6 +287,7 @@ export class ScalaToolchain {
       manifestHostVersion,
       versionMismatch: Boolean(manifestHostVersion && manifestHostVersion !== HOST_VERSION),
       supportsWasmTarget: this.supportsWasmTarget,
+      supportsMacros: this.supportsMacros,
       warmCompiles: this.warmCompiles,
       incrementalLinking: this.incrementalLinking,
       missingExports,

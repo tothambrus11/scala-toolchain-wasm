@@ -109,6 +109,49 @@ const cases = [
     },
   },
   {
+    // The headline capability of this distribution, and the expensive one: expanding this
+    // macro means the compiler links a second copy of itself with `showImpl` in it, imports
+    // that, and re-enters the compile. If macro support regresses, it regresses here.
+    name: "expands a quoted macro the program defines itself",
+    files: {
+      "Macros.scala": `package demo
+
+import scala.quoted.*
+
+object Macros:
+  inline def twice(inline x: Int): Int = \${ twiceImpl('x) }
+
+  private def twiceImpl(x: Expr[Int])(using Quotes): Expr[Int] = '{ \$x * 2 }
+`,
+      "Main.scala": `import demo.Macros
+
+@main def hello(): Unit = println("twice=" + Macros.twice(21))
+`,
+    },
+    target: "js",
+    expect(result) {
+      assert(result.ok, `compilation should succeed, got:\n${result.compilerOutput}`);
+      assert(result.ran, "program should run");
+      // 42 could only be produced by actually running twiceImpl at compile time.
+      assertIncludes(result.output, "twice=42");
+    },
+  },
+  {
+    // Macro support costs 22 MB of compiler IR and a second linked compiler, so a program
+    // without macros must never trigger any of it. This case would still pass if it did -
+    // what guards that is its timing, which is why it runs right after the macro case.
+    name: "leaves a macro-free program on the fast path",
+    files: {
+      "Main.scala": `@main def hello(): Unit = println("plain " + (1 to 4).product)`,
+    },
+    target: "js",
+    expect(result) {
+      assert(result.ok, "compilation should succeed");
+      assertIncludes(result.output, "plain 24");
+      assert(result.compileMs < 4000, `a macro-free compile should stay fast, took ${Math.round(result.compileMs)}ms`);
+    },
+  },
+  {
     name: "compiles several files together, with the standard library",
     files: {
       "Greeter.scala": `package util
@@ -230,6 +273,7 @@ try {
     ["manifest records the upstream ref", /^[0-9a-f]{40}$/.test(info.toolchain?.ref ?? "")],
     ["manifest records the Scala version", /^\d+\.\d+/.test(info.toolchain?.scalaVersion ?? "")],
     ["distribution supports the WebAssembly target", info.ready?.supportsWasmTarget === true],
+    ["distribution can expand quoted macros", info.ready?.supportsMacros === true],
     // The host ships inside the distribution, so these can only disagree if the build staged
     // one release's host over another's compiler - which reads to a user as a missing feature.
     ["the staged host is the one the manifest records", info.ready?.versionMismatch === false],

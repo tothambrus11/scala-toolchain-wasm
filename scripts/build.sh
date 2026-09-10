@@ -26,8 +26,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/pgilliar/scala3-compiler-sjs}"
-UPSTREAM_REF="${UPSTREAM_REF:-357051c857d4ffd5d1e1bfc9a56f0cbf5943a325}"
+UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/univalence-xyz/scala3-on-wasm}"
+UPSTREAM_REF="${UPSTREAM_REF:-8fdbb99d312de6935bb7482624245caafac27b66}"
 CACHE_DIR="${CACHE_DIR:-$REPO_ROOT/.cache}"
 CHECKOUT_DIR="${CHECKOUT_DIR:-$CACHE_DIR/scala3-compiler-sjs}"
 DIST_DIR="${DIST_DIR:-$REPO_ROOT/dist}"
@@ -82,19 +82,24 @@ rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"/{compiler,classpath,runtime,vendor,host}
 
 cp "$UPSTREAM_ASSETS"/compiler/{main.wasm,main.js,__loader.js} "$DIST_DIR/compiler/"
+# The compiler's own Scala.js IR. Only macro compiles need it - expanding a quoted macro
+# means linking a second compiler with the macro implementation in it - so the host fetches
+# it lazily, on the first compile of a source that defines one. It is 22 MB.
+cp "$UPSTREAM_ASSETS"/compiler/compiler-sjsir.zip "$DIST_DIR/compiler/"
 cp "$UPSTREAM_ASSETS"/classpath/rt.jar "$UPSTREAM_ASSETS"/classpath/scalajs-lib.jar "$DIST_DIR/classpath/"
 cp "$UPSTREAM_ASSETS"/runtime/runtime-sjsir.zip "$DIST_DIR/runtime/"
 
-# The compile-time Scala library must be `.class` + `.tasty`. Upstream stages
-# `scala-library-sjs/packageBin`, which on a clean build holds only Scala.js IR (`.sjsir`);
-# a compiler given that jar cannot resolve `scala.Predef` and fails with
-# "Not found: type Unit" on hello-world. Package the merged library class directory instead,
-# the same one the upstream Node-hosted test uses. See docs/patches.md.
-SCALA_LIB_CLASSES="$TARGET_DIR/node-libs/scala-lib"
-[[ -d "$SCALA_LIB_CLASSES" ]] || die "missing $SCALA_LIB_CLASSES"
-[[ -n "$(find "$SCALA_LIB_CLASSES" -name 'Predef.tasty' -print -quit)" ]] ||
-  die "$SCALA_LIB_CLASSES has no Predef.tasty - it is not a Scala 3 compile-time library"
-jar --create --file "$DIST_DIR/classpath/scala-lib.jar" -C "$SCALA_LIB_CLASSES" .
+# The compile-time Scala library must be `.class` + `.tasty`, not Scala.js IR alone: a
+# compiler given a `.sjsir`-only jar cannot resolve `scala.Predef` and fails with
+# "Not found: type Unit" on hello-world. Upstream staged such a jar until the `macro` branch
+# fixed it, so we used to rebuild the jar ourselves. Now we take theirs - and check, because
+# this is exactly the kind of thing that regresses silently.
+cp "$UPSTREAM_ASSETS"/classpath/scala-lib.jar "$DIST_DIR/classpath/"
+# `unzip | grep -q` would fail under `pipefail`: grep exits at the first match and unzip dies
+# on SIGPIPE, so the check would reject a jar that is perfectly good. List, then match.
+scala_lib_entries=$(unzip -Z1 "$DIST_DIR/classpath/scala-lib.jar")
+grep -q '^scala/Predef\.tasty$' <<<"$scala_lib_entries" ||
+  die "staged scala-lib.jar has no scala/Predef.tasty - it is not a Scala 3 compile-time library"
 
 # The compiler bundle reads classpath jars through a hard-coded `../vendor/jszip-wrapper.js`
 # import. Upstream satisfies it with a 370 KB copy of JSZip; we satisfy it with our own
@@ -133,6 +138,7 @@ writeFileSync(process.argv[2], JSON.stringify({
   },
   compilerModule: "./compiler/main.js",
   runtimeIR: "./runtime/runtime-sjsir.zip",
+  compilerIR: "./compiler/compiler-sjsir.zip",
   host: "./host/index.js",
   hostWorker: "./host/worker.js",
   classpath: [

@@ -37,12 +37,19 @@ function describeError(error) {
     }
   };
 
+  // A Scala.js exception crossing this boundary often has an empty or absent `message`, and
+  // an empty message is worse than none: it reaches the user as a bare "Error". Fall through
+  // to whatever the value can still say about itself.
+  const candidates = [
+    error?.message,
+    typeof error?.getMessage === "function" ? error.getMessage() : undefined,
+    error?.toString === Object.prototype.toString ? undefined : error,
+  ];
   const message =
-    typeof error?.message === "string"
-      ? error.message
-      : typeof error?.getMessage === "function"
-        ? text(error.getMessage())
-        : text(error);
+    candidates.map(text).find((value) => typeof value === "string" && value.trim() !== "" && value !== "[object Object]") ??
+    `${error?.constructor?.name ?? "Error"} with no message (fields: ${
+      error && typeof error === "object" ? Object.keys(error).slice(0, 10).join(", ") || "none" : typeof error
+    })`;
 
   return {
     name: typeof error?.name === "string" ? error.name : error?.constructor?.name ?? "Error",

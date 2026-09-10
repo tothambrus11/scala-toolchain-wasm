@@ -31,7 +31,13 @@ export class ScalaEngine {
         break;
       case "error": {
         this.#pending.delete(id);
-        const error = Object.assign(new Error(message.error.message), message.error);
+        // Assign only what the worker actually knew: a null `stack` or an absent `message`
+        // copied over the Error's own would erase the little information there is.
+        const payload = message.error ?? {};
+        const error = new Error(payload.message || "The Scala engine failed without a message");
+        for (const [key, value] of Object.entries(payload)) {
+          if (value !== null && value !== undefined) error[key] = value;
+        }
         if (pending) pending.reject(error);
         else this.#emit("error", error);
         break;

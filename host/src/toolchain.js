@@ -3,6 +3,20 @@ import { installCompressedAssetFetch } from "./compressed-assets.js";
 import { readZipEntries } from "./zip.js";
 import { parseDiagnostics } from "./diagnostics.js";
 
+/**
+ * This runtime's version. It ships inside a distribution, so it should always equal the
+ * manifest's `toolchain.hostVersion` - if it does not, something is serving a mix of two
+ * releases, and the symptoms are confusing (missing exports look like missing features).
+ */
+export const HOST_VERSION = "0.2.1";
+
+/** Exports this runtime needs from the compiler bundle to offer its full feature set. */
+const EXPECTED_EXPORTS = [
+  "runScala3CompilerSessionAsync",
+  "linkScalaJSSessionAsync",
+  "setScalaJSRuntimeIR",
+];
+
 const WORKSPACE_DIR = "/workspace";
 const OUTPUT_DIR = "/workspace/out";
 const RUNTIME_IR_DIR = "/runtime";
@@ -70,6 +84,16 @@ export class ScalaToolchain {
 
     const toolchain = new ScalaToolchain({ compilerModule, manifest, fs, stateless });
     toolchain.runtimeIRUrl = resolve(manifest.runtimeIR);
+
+    const { hostVersion } = manifest.toolchain ?? {};
+    if (hostVersion && hostVersion !== HOST_VERSION) {
+      console.warn(
+        `[scala-toolchain] version mismatch: this runtime is ${HOST_VERSION}, but the ` +
+          `distribution was built with ${hostVersion}. Something is serving a mix of two ` +
+          "releases - a stale cache is the usual cause. Reload bypassing the cache.",
+      );
+    }
+
     onProgress("ready");
     return toolchain;
   }
@@ -164,6 +188,28 @@ export class ScalaToolchain {
       await this.link(compilation.irFiles, { mainClass: "__Warmup", target });
     }
     return { ok: compilation.ok, durationMs: now() - started };
+  }
+
+  /**
+   * What this toolchain can do, and why not, when the answer is no.
+   *
+   * A feature reported as unavailable is almost always a missing export rather than a missing
+   * feature: the compiler bundle and this runtime came from different releases.
+   */
+  get capabilities() {
+    const missingExports = EXPECTED_EXPORTS.filter(
+      name => typeof this.#compilerModule[name] !== "function",
+    );
+    const manifestHostVersion = this.#manifest.toolchain?.hostVersion ?? null;
+    return {
+      hostVersion: HOST_VERSION,
+      manifestHostVersion,
+      versionMismatch: Boolean(manifestHostVersion && manifestHostVersion !== HOST_VERSION),
+      supportsWasmTarget: this.supportsWasmTarget,
+      warmCompiles: this.warmCompiles,
+      incrementalLinking: this.incrementalLinking,
+      missingExports,
+    };
   }
 
   /** Whether this toolchain links incrementally between runs. */

@@ -1,6 +1,7 @@
 export { ScalaEngine } from "./client.js";
 export {
   ScalaToolchain,
+  HOST_VERSION,
   UnsupportedRuntimeError,
   missingWasmFeatures,
   findEntryPoints,

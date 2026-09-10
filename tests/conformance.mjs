@@ -197,6 +197,7 @@ const browser = await chromium.launch({
 });
 
 let failures = 0;
+let total = 0;
 try {
   const page = await browser.newPage();
   page.on("pageerror", error => console.log("  [pageerror]", error.message.slice(0, 200)));
@@ -229,14 +230,20 @@ try {
     ["manifest records the upstream ref", /^[0-9a-f]{40}$/.test(info.toolchain?.ref ?? "")],
     ["manifest records the Scala version", /^\d+\.\d+/.test(info.toolchain?.scalaVersion ?? "")],
     ["distribution supports the WebAssembly target", info.ready?.supportsWasmTarget === true],
+    // The host ships inside the distribution, so these can only disagree if the build staged
+    // one release's host over another's compiler - which reads to a user as a missing feature.
+    ["the staged host is the one the manifest records", info.ready?.versionMismatch === false],
+    ["the compiler bundle exports everything the host expects", info.ready?.missingExports?.length === 0],
   ];
   for (const [name, ok] of preflight) {
     console.log(`${ok ? "PASS" : "FAIL"}  ${name}`);
+    total++;
     if (!ok) failures++;
   }
 
   {
     const caseStarted = Date.now();
+    total++;
     try {
       await editSequence.run(page);
       console.log(`PASS  ${editSequence.name}  (${((Date.now() - caseStarted) / 1000).toFixed(1)}s)`);
@@ -248,6 +255,7 @@ try {
 
   for (const testCase of cases) {
     const caseStarted = Date.now();
+    total++;
     try {
       const result = await page.evaluate(
         ({ files, target }) => globalThis.__engine.run(files, { target }),
@@ -269,6 +277,5 @@ try {
   server.kill();
 }
 
-const total = cases.length + 5;
 console.log(failures === 0 ? `\nAll ${total} checks passed.` : `\n${failures} of ${total} checks failed.`);
 process.exit(failures === 0 ? 0 : 1);

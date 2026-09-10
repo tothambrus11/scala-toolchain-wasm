@@ -85,7 +85,7 @@ const handlers = {
   async init(request) {
     if (request.manifestUrl) manifestUrl = request.manifestUrl;
     const tools = await toolchain();
-    return { ready: true, supportsWasmTarget: tools.supportsWasmTarget };
+    return { ready: true, supportsWasmTarget: tools.supportsWasmTarget, ...tools.capabilities };
   },
 
   async warmUp(request) {

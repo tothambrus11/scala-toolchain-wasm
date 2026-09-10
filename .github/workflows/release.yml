@@ -1,0 +1,134 @@
+name: Release
+
+# Tag a release (`git tag v0.1.0 && git push --tags`) or run this by hand. The job builds
+# the toolchain from the pinned upstream commit, proves it works in a real browser, and
+# publishes the tarballs consumers download.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream commit to build (defaults to the one pinned in scripts/build.sh)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # A cold build is 15-20 minutes; leave room for the browser tests and packaging.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # rt.jar is extracted from this JDK, so it defines the Java API surface that user
+          # code compiles against. Changing it changes the distribution.
+          java-version: "21"
+
+      - uses: sbt/setup-sbt@v1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The upstream checkout is ~1 GB blobless; the dependency caches save most of the build.
+      - name: Cache Coursier and Ivy
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+            ~/.sbt
+          key: sbt-${{ runner.os }}-${{ hashFiles('scripts/build.sh') }}
+          restore-keys: sbt-${{ runner.os }}-
+
+      - name: Cache the upstream checkout
+        uses: actions/cache@v4
+        with:
+          path: .cache/scala3-compiler-sjs
+          key: upstream-${{ hashFiles('scripts/build.sh') }}
+          restore-keys: upstream-
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Build the toolchain
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          if [ -n "$UPSTREAM_REF" ]; then
+            UPSTREAM_REF="$UPSTREAM_REF" scripts/build.sh
+          else
+            scripts/build.sh
+          fi
+
+      - name: Conformance tests
+        run: npm test
+
+      - name: Determine the version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(node -p "require('./host/package.json').version")+$(date -u +%Y%m%d%H%M)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        run: VERSION=${{ steps.version.outputs.version }} scripts/package-dist.sh
+
+      # The manifest records exactly what went into this build; put it in the release notes
+      # so consumers can see the Scala/Scala.js/JDK triple without downloading anything.
+      - name: Write release notes
+        run: |
+          {
+            echo "Scala WebAssembly toolchain \`${{ steps.version.outputs.version }}\`."
+            echo
+            echo '```json'
+            node -p "JSON.stringify(require('./dist/manifest.json').toolchain, null, 2)"
+            echo '```'
+            echo
+            echo "| Artifact | Use |"
+            echo "| --- | --- |"
+            echo "| \`scala-toolchain-wasm-${{ steps.version.outputs.version }}.tar.gz\` | the distribution as built |"
+            echo "| \`scala-toolchain-wasm-${{ steps.version.outputs.version }}-compressed.tar.gz\` | \`main.wasm\` stored gzipped, for hosts that cap files at 25 MiB (Cloudflare Pages/Workers) |"
+            echo
+            echo "Verified in headless Chromium: compiles, links to JavaScript and to WebAssembly, runs, and reports diagnostics."
+          } > release-notes.md
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          body_path: release-notes.md
+          files: |
+            release/*.tar.gz
+            release/SHA256SUMS
+
+      # Without a tag (manual run) keep the artifacts on the workflow run instead.
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        with:
+          name: scala-toolchain-wasm-${{ steps.version.outputs.version }}
+          path: release/
+
+      # Optional: publish the host runtime to npm. Skipped unless NPM_TOKEN is configured,
+      # so a fork or a first release does not fail on a missing secret.
+      - name: Publish the host runtime to npm
+        if: github.ref_type == 'tag' && env.NPM_TOKEN != ''
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd host
+          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+          echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > ~/.npmrc
+          npm publish --access public

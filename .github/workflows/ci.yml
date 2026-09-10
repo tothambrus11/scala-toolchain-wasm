@@ -1,0 +1,70 @@
+name: CI
+
+# The distribution is the product, so CI builds it and proves it works in a browser.
+# That is slow (15-20 minutes cold, a few minutes warm), which is the honest cost of a
+# repository whose output is a compiler.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: sbt/setup-sbt@v1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache Coursier and Ivy
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+            ~/.sbt
+          key: sbt-${{ runner.os }}-${{ hashFiles('scripts/build.sh') }}
+          restore-keys: sbt-${{ runner.os }}-
+
+      - name: Cache the upstream checkout
+        uses: actions/cache@v4
+        with:
+          path: .cache/scala3-compiler-sjs
+          key: upstream-${{ hashFiles('scripts/build.sh') }}
+          restore-keys: upstream-
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Build the toolchain
+        run: scripts/build.sh
+
+      - name: Conformance tests
+        run: npm test
+
+      # Catch a distribution that would be rejected by static hosts before anyone tags it.
+      - name: Check the compressed variant
+        run: |
+          scripts/package-dist.sh
+          mkdir -p release/unpacked
+          tar -xzf release/*-compressed.tar.gz -C release/unpacked --strip-components=1
+          DIST=release/unpacked npm test
+
+      - name: Upload the distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: release/*.tar.gz
+          retention-days: 7

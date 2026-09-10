@@ -12,6 +12,15 @@ on:
         description: "Upstream commit to build (defaults to the one pinned in scripts/build.sh)"
         required: false
         type: string
+      version:
+        description: "Version to publish, without the leading v (defaults to host/package.json + a timestamp)"
+        required: false
+        type: string
+      publish:
+        description: "Create the tag and publish a GitHub Release (otherwise artifacts stay on this run)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -77,10 +86,13 @@ jobs:
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             version="${GITHUB_REF_NAME#v}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
           else
             version="$(node -p "require('./host/package.json').version")+$(date -u +%Y%m%d%H%M)"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=${{ github.ref_type == 'tag' || inputs.publish }}" >> "$GITHUB_OUTPUT"
 
       - name: Package
         run: VERSION=${{ steps.version.outputs.version }} scripts/package-dist.sh
@@ -104,10 +116,14 @@ jobs:
             echo "Verified in headless Chromium: compiles, links to JavaScript and to WebAssembly, runs, and reports diagnostics."
           } > release-notes.md
 
+      # `tag_name` lets a manual run create the tag as well, so a release can be cut from the
+      # Actions UI by anyone with write access - no local tag push required.
       - name: Publish the release
         uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
+        if: steps.version.outputs.publish == 'true'
         with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
           body_path: release-notes.md
           files: |
             release/*.tar.gz
@@ -116,7 +132,7 @@ jobs:
       # Without a tag (manual run) keep the artifacts on the workflow run instead.
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
-        if: github.ref_type != 'tag'
+        if: steps.version.outputs.publish != 'true'
         with:
           name: scala-toolchain-wasm-${{ steps.version.outputs.version }}
           path: release/
@@ -124,7 +140,7 @@ jobs:
       # Optional: publish the host runtime to npm. Skipped unless NPM_TOKEN is configured,
       # so a fork or a first release does not fail on a missing secret.
       - name: Publish the host runtime to npm
-        if: github.ref_type == 'tag' && env.NPM_TOKEN != ''
+        if: steps.version.outputs.publish == 'true' && env.NPM_TOKEN != ''
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |

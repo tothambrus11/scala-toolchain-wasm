@@ -31,6 +31,11 @@ jobs:
     # A cold build is 15-20 minutes; leave room for the browser tests and packaging.
     timeout-minutes: 90
 
+    # Secrets are not available to `if:` conditions, and step-level env is not in scope for
+    # that step's own condition, so surface it at job level.
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -141,8 +146,6 @@ jobs:
       # so a fork or a first release does not fail on a missing secret.
       - name: Publish the host runtime to npm
         if: steps.version.outputs.publish == 'true' && env.NPM_TOKEN != ''
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd host
           npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version

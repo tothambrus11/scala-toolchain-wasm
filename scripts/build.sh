@@ -114,7 +114,8 @@ cp "$REPO_ROOT/host/src"/*.js "$DIST_DIR/host/"
 scala_version=$(basename "$(ls -d "$CHECKOUT_DIR"/compiler/target/scala3-compiler-nonbootstrapped/scala-* 2>/dev/null | head -1)" 2>/dev/null || echo "scala-unknown")
 scala_version=${scala_version#scala-}
 scalajs_version=$(grep -oE 'sbt-scalajs" % "[^"]+"' "$CHECKOUT_DIR/project/plugins.sbt" 2>/dev/null | grep -oE '[0-9][^"]*' | head -1 || true)
-jdk_version=$(java -version 2>&1 | head -1 | grep -oE '"[^"]+"' | tr -d '"' || echo unknown)
+# `java -version` writes to stderr, and a JAVA_TOOL_OPTIONS banner can precede the version.
+jdk_version=$(java -version 2>&1 | grep -v '^Picked up' | head -1 | grep -oE '"[^"]+"' | tr -d '"' || echo unknown)
 host_version=$(node -p "require('$REPO_ROOT/host/package.json').version")
 
 node - "$DIST_DIR/manifest.json" <<NODE

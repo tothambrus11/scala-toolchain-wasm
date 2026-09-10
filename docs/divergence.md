@@ -25,6 +25,17 @@ Three ways out, in order of preference:
 Meanwhile, everything below is written so the fork can move without conflicts: our compiler-side
 code is *added* to its source path, never patched.
 
+The fork's next branch, `macro`, is a **migration rather than an upgrade**: it builds with our
+sources unchanged and passes conformance, but its macro support runs through a host-side relink
+protocol we do not implement, and taking it without that would turn today's clean
+"macros are not supported" error into a crash. [fork.md](fork.md) records the trial build and
+the measurements. Two items fall out of it:
+
+| What | Disposition | Notes |
+| --- | --- | --- |
+| Macro support | **Adopt, deliberately** | Needs our host to answer the compiler's missing-entry-point interrupt: relink the macro's `.sjsir`, publish it as a module URL, `import()` it, restart the compile. The largest language-level gap we have. |
+| `fullLinkJS` for the compiler bundle | **Measure, then probably adopt** | The `macro` branch links fully-optimized and ships 11 MB of Wasm against our 31.7 MB. It is a two-line change to the upstream build, but it costs build time and may cost compile speed. A/B it first. |
+
 ## Compiler-side (Scala)
 
 | What | Disposition | Notes |

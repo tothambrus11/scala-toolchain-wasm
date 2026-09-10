@@ -90,20 +90,40 @@ output is wrong.
 own commit messages: a macro scanner, `.sjsir` emission and relinking for macros, the browser
 worker rewritten *in Scala*, a linker cache, and validation/compilation test suites.
 
-Its exported JS API is different from ours:
+**We trial-built it** with our `src-sjs/` injected, and ran the conformance suite against the
+result. What that showed:
 
-| `browser` (pinned) | `macro` |
-| --- | --- |
-| `runScala3CompilerSJSAsync` | `runScala3CompilerSJSAsync` |
-| `linkScalaJSAsync`, `linkScalaJSModuleAsync` | *(now internal to the worker)* |
-| — | `startScala3BrowserIDEWorker`, `runScala3SjsMacroSessionAsync` |
+| | our pin (`browser`) | `macro` |
+| --- | --- | --- |
+| builds with our sources injected | yes | **yes, unchanged** |
+| conformance (11 checks) | pass | **pass** |
+| `compiler/main.wasm` | 31.7 MB | **11 MB** |
+| a program using a quoted macro | a clean compiler error | **an opaque crash** |
 
-It also independently implements much of what this repository adds: its `BrowserLinkerBridge`
-now has its own `LinkerSession` built on Scala.js's `IRFileCache`, with `checkIR(false)` and
-content-hashed IR versions — the same conclusions our `LinkerSession` reached, via the more
-official API — and it enables `withExperimentalUseWebAssembly` for compiler modules.
+Two things follow, and they point in opposite directions.
 
-Moving to it would plausibly buy **macro support**, which is our largest language-level gap,
-and let us delete code. It would also mean adopting their worker or reworking our host around
-the changed exports. That is a migration, not a version bump — tracked in
-[divergence.md](divergence.md).
+**It drops in.** Our `CompilerSession` and `LinkerSession` compile against it as-is, and it
+still exports the three entry points our host needs, so everything we test today keeps working.
+
+**But macros still would not.** The branch supports macros through a different protocol: the
+compiler raises a missing-entry-point interrupt, and the *host* is expected to relink that
+macro's `.sjsir` into an ES module, publish it at a URL (`__scala3CompilerSJSPublicModuleUrls`),
+`import()` it back, and restart the compile - up to eight times. That loop lives behind
+`runScala3SjsMacroSessionAsync`, alongside `startScala3BrowserIDEWorker`, their in-Scala worker.
+Our host calls `runScala3CompilerSessionAsync`, which does not run the loop, so a macro program
+hits the interrupt with nobody to answer it. Today the pinned build says
+"quoted macro expansion is not supported by scala3-compiler-sjs" and stops, which is worse in
+principle and much better in practice.
+
+So the pin stays where it is. Taking macro support means implementing their relink protocol in
+our host - real work, worth doing deliberately, tracked in [divergence.md](divergence.md).
+
+### One thing worth stealing sooner
+
+The 31.7 MB → 11 MB difference is not macros. Their `prepareBrowserIDE` links the compiler with
+`fullLinkJS`; ours (`browser`, `project/Build.scala:1912`) uses `fastLinkJS`. That is a two-line
+change to the upstream build we could carry as a patch, and it is by far the largest asset a
+visitor downloads. It is not free: full optimization costs build time, and compiles in the
+trial build ran perhaps 30% slower than the pinned ones - close enough to noise, on a loaded
+machine, that it needs a proper A/B before anyone believes either number. Measure it before
+taking it.

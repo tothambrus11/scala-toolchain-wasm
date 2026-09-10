@@ -1,6 +1,6 @@
 {
   "name": "scala-toolchain-wasm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser host for the Scala 3 compiler and Scala.js linker compiled to WebAssembly",
   "type": "module",
   "main": "src/index.js",
@@ -9,8 +9,17 @@
     "./worker": "./src/worker.js",
     "./toolchain": "./src/toolchain.js"
   },
-  "files": ["src"],
-  "keywords": ["scala", "webassembly", "wasm", "scala.js", "compiler", "browser"],
+  "files": [
+    "src"
+  ],
+  "keywords": [
+    "scala",
+    "webassembly",
+    "wasm",
+    "scala.js",
+    "compiler",
+    "browser"
+  ],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

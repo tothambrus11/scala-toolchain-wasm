@@ -88,6 +88,14 @@ const handlers = {
     return { ready: true, supportsWasmTarget: tools.supportsWasmTarget };
   },
 
+  async warmUp(request) {
+    const tools = await toolchain();
+    post({ type: "progress", stage: "warming" });
+    const result = await tools.warmUp({ target: request.target });
+    post({ type: "progress", stage: "ready" });
+    return result;
+  },
+
   async compile(request) {
     const tools = await toolchain();
     post({ type: "progress", stage: "compiling" });

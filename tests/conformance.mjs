@@ -148,6 +148,47 @@ object Main:
   },
 ];
 
+/**
+ * The toolchain caches aggressively between compiles - the classpath index, the linker's
+ * analysis. That is where correctness bugs would hide, so drive a session through a sequence
+ * of edits and check each answer is about the current source, not a previous one.
+ */
+const editSequence = {
+  name: "stays correct across repeated edits in one session",
+  async run(page) {
+    const steps = [
+      { source: 'object Main:\n  def main(args: Array[String]): Unit = println(nope)\n', expect: "Not found: nope" },
+      { source: 'object Main:\n  def main(args: Array[String]): Unit = println("first")\n', expect: null },
+      { source: 'object Main:\n  def main(args: Array[String]): Unit = println("second")\n', expect: null },
+      { source: 'object Main:\n  def main(args: Array[String]): Unit =\n    val n: Int = "text"\n    println(n)\n', expect: "Found:" },
+      { source: 'object Renamed:\n  def main(args: Array[String]): Unit = println("renamed")\n', expect: null },
+      { source: 'object Main:\n  def main(args: Array[String]): Unit = println("back again")\n', expect: null },
+    ];
+
+    for (const [index, step] of steps.entries()) {
+      const result = await page.evaluate(
+        source => globalThis.__engine.compile({ "Main.scala": source }),
+        step.source,
+      );
+
+      if (step.expect === null) {
+        assert(
+          result.ok,
+          `step ${index + 1} should compile, got ${result.errorCount} error(s):\n${result.compilerOutput}`,
+        );
+        assert(result.irFileCount > 0, `step ${index + 1} compiled but emitted no IR`);
+      } else {
+        assert(!result.ok, `step ${index + 1} should have failed`);
+        assertIncludes(result.diagnostics.map(d => d.message).join("\n"), step.expect);
+        assert(
+          result.errorCount === 1,
+          `step ${index + 1} should report exactly one error, got ${result.errorCount}: ${result.compilerOutput}`,
+        );
+      }
+    }
+  },
+};
+
 const server = await startServer();
 const browser = await chromium.launch({
   headless: process.env.HEADED !== "1",
@@ -194,6 +235,17 @@ try {
     if (!ok) failures++;
   }
 
+  {
+    const caseStarted = Date.now();
+    try {
+      await editSequence.run(page);
+      console.log(`PASS  ${editSequence.name}  (${((Date.now() - caseStarted) / 1000).toFixed(1)}s)`);
+    } catch (error) {
+      failures++;
+      console.log(`FAIL  ${editSequence.name}\n      ${error.message.split("\n").join("\n      ")}`);
+    }
+  }
+
   for (const testCase of cases) {
     const caseStarted = Date.now();
     try {
@@ -217,6 +269,6 @@ try {
   server.kill();
 }
 
-const total = cases.length + 4;
+const total = cases.length + 5;
 console.log(failures === 0 ? `\nAll ${total} checks passed.` : `\n${failures} of ${total} checks failed.`);
 process.exit(failures === 0 ? 0 : 1);

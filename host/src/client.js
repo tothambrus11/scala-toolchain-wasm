@@ -71,6 +71,15 @@ export class ScalaEngine {
     return this.ready;
   }
 
+  /**
+   * Compile and link a throwaway program in the background, so the user's first build does
+   * not pay the one-off costs. Safe to call right after `init()`; it is queued behind
+   * nothing and ahead of the user's first request.
+   */
+  warmUp(target = "js") {
+    return this.#request("warmUp", { target });
+  }
+
   /** Compile only. `files` maps workspace-relative names to source text. */
   compile(files, options) {
     return this.#request("compile", { files, options });

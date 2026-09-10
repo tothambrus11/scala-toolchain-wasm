@@ -21,11 +21,19 @@ export class ScalaToolchain {
   #compilerModule;
   #manifest;
   #runtimeIR = null;
+  #runtimeIRShared = false;
+  #stateless = false;
+  // The compiler owns one virtual workspace, so compiles must not overlap - a background
+  // warm-up would otherwise clear the directory a user's compile is reading.
+  #queue = Promise.resolve();
 
-  constructor({ compilerModule, manifest, fs }) {
+  constructor({ compilerModule, manifest, fs, stateless = false }) {
     this.#compilerModule = compilerModule;
     this.#manifest = manifest;
     this.fs = fs;
+    // Escape hatch: force the stateless entry point, for A/B measurement or if a warm
+    // session is ever suspected of returning stale results.
+    this.#stateless = stateless;
   }
 
   /**
@@ -33,7 +41,7 @@ export class ScalaToolchain {
    * @param {string} [options.manifestUrl] location of the toolchain manifest
    * @param {(stage: string, detail?: object) => void} [options.onProgress]
    */
-  static async load({ manifestUrl = "./assets/manifest.json", onProgress = () => {} } = {}) {
+  static async load({ manifestUrl = "./assets/manifest.json", onProgress = () => {}, stateless = false } = {}) {
     const missing = missingWasmFeatures();
     if (missing.length > 0) throw new UnsupportedRuntimeError(missing);
 
@@ -60,7 +68,7 @@ export class ScalaToolchain {
     onProgress("compiler");
     const compilerModule = await import(resolve(manifest.compilerModule));
 
-    const toolchain = new ScalaToolchain({ compilerModule, manifest, fs });
+    const toolchain = new ScalaToolchain({ compilerModule, manifest, fs, stateless });
     toolchain.runtimeIRUrl = resolve(manifest.runtimeIR);
     onProgress("ready");
     return toolchain;
@@ -76,7 +84,11 @@ export class ScalaToolchain {
    * @param {Record<string, string>} files path (relative to the workspace) -> source text
    * @param {{options?: string[]}} [config] extra scalac options
    */
-  async compile(files, { options = [] } = {}) {
+  compile(files, config = {}) {
+    return this.#serialize(() => this.#compile(files, config));
+  }
+
+  async #compile(files, { options = [] } = {}) {
     const fs = this.fs;
     fs.removeTree(WORKSPACE_DIR);
     fs.mkdirp(OUTPUT_DIR);
@@ -90,9 +102,7 @@ export class ScalaToolchain {
 
     const args = ["-classpath", this.classpath, "-d", OUTPUT_DIR, ...options, ...sourcePaths];
     const started = now();
-    const { result: exitCode, lines } = await captureConsole(() =>
-      this.#compilerModule.runScala3CompilerSJSAsync(args),
-    );
+    const { result: exitCode, lines } = await captureConsole(() => this.#runCompiler(args));
 
     const { diagnostics, errorCount, warningCount } = parseDiagnostics(lines);
     const irFiles = exitCode === 0
@@ -114,6 +124,66 @@ export class ScalaToolchain {
     };
   }
 
+  /**
+   * Run the compiler, preferring the entry point that keeps its classpath and symbol table
+   * between compiles. Building a fresh compiler each time costs seconds - it re-scans a
+   * 15 MB `rt.jar` and reloads the standard library - so the warm one is used whenever the
+   * distribution provides it.
+   */
+  #runCompiler(args) {
+    if (!this.#stateless && typeof this.#compilerModule.runScala3CompilerSessionAsync === "function") {
+      return this.#compilerModule.runScala3CompilerSessionAsync(args);
+    }
+    return this.#compilerModule.runScala3CompilerSJSAsync(args);
+  }
+
+  /** Run work one at a time, in the order it arrived. */
+  #serialize(work) {
+    const result = this.#queue.then(work, work);
+    // Keep the chain alive even when a caller's work rejects.
+    this.#queue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  /**
+   * Compile and link a throwaway program so the user's first one does not pay for it.
+   *
+   * The first compile of a session scans a 15 MB classpath and the first link parses the
+   * runtime IR: together several seconds, all of it one-off. Doing it in the background right
+   * after loading turns a first edit-run from ~8 s into the steady-state ~0.7 s.
+   */
+  async warmUp({ target = "js" } = {}) {
+    const started = now();
+    const compilation = await this.compile({
+      "__Warmup.scala": "object __Warmup:\n  def main(args: Array[String]): Unit = println(\"\")\n",
+    });
+    if (compilation.ok) {
+      await this.link(compilation.irFiles, { mainClass: "__Warmup", target });
+    }
+    return { ok: compilation.ok, durationMs: now() - started };
+  }
+
+  /** Whether this toolchain links incrementally between runs. */
+  get incrementalLinking() {
+    return typeof this.#compilerModule.linkScalaJSSessionAsync === "function";
+  }
+
+  /** Whether this toolchain keeps compiler state between compiles. */
+  get warmCompiles() {
+    return !this.#stateless && typeof this.#compilerModule.runScala3CompilerSessionAsync === "function";
+  }
+
+  /**
+   * Drop the cached classpath and symbols. The next compile starts cold, which is what you
+   * want if the classpath changes - or to rule the cache out when diagnosing odd diagnostics.
+   */
+  resetSession() {
+    this.#compilerModule.resetScala3CompilerSession?.();
+  }
+
   /** Lazily fetch and inflate the runtime `.sjsir` needed at link time. */
   async #runtimeIRFiles() {
     if (!this.#runtimeIR) {
@@ -130,7 +200,7 @@ export class ScalaToolchain {
 
   /** Whether this toolchain build can link user programs to WebAssembly. */
   get supportsWasmTarget() {
-    return typeof this.#compilerModule.linkScalaJSWasmAsync === "function";
+    return typeof this.#compilerModule.linkScalaJSSessionAsync === "function";
   }
 
   /**
@@ -141,27 +211,61 @@ export class ScalaToolchain {
    *   `mainClass` makes the module run `mainClass.main` on import; `target` selects the
    *   linker backend, so the user's program can be WebAssembly like the compiler itself.
    */
-  async link(irFiles, { mainClass = null, target = "js" } = {}) {
+  link(irFiles, config = {}) {
+    return this.#serialize(() => this.#link(irFiles, config));
+  }
+
+  async #link(irFiles, { mainClass = null, target = "js" } = {}) {
     if (target === "wasm" && !this.supportsWasmTarget) {
       throw new Error(
-        "This toolchain build cannot link to WebAssembly: it has no linkScalaJSWasmAsync export. Rebuild the assets with scripts/build-compiler-assets.sh.",
+        "This toolchain build cannot link to WebAssembly: it has no linkScalaJSSessionAsync export. Rebuild it from scala-toolchain-wasm.",
       );
     }
 
     const started = now();
-    const allIR = (await this.#runtimeIRFiles()).concat(irFiles);
+    const incremental = typeof this.#compilerModule.linkScalaJSSessionAsync === "function";
+
+    // With a session, the runtime IR crosses the boundary once per page, not once per link.
+    let allIR = irFiles;
+    if (incremental) {
+      if (!this.#runtimeIRShared) {
+        this.#compilerModule.setScalaJSRuntimeIR(await this.#runtimeIRFiles());
+        this.#runtimeIRShared = true;
+      }
+    } else {
+      allIR = (await this.#runtimeIRFiles()).concat(irFiles);
+    }
+
     const { result, lines } = await captureConsole(() => {
-      if (target === "wasm") return this.#compilerModule.linkScalaJSWasmAsync(allIR, mainClass ?? "");
+      // The incremental linker keeps its state between links, so a re-run does not re-parse
+      // 15 MB of runtime IR. It returns every emitted file for both targets.
+      if (incremental) {
+        return this.#compilerModule.linkScalaJSSessionAsync(allIR, mainClass ?? "", target);
+      }
+      // Fallback: a distribution built without this repository's sources only has the
+      // upstream JavaScript bridges.
+      if (target === "wasm") {
+        throw new Error(
+          "This toolchain cannot link to WebAssembly: it was built without scala-toolchain-wasm's compiler-side sources.",
+        );
+      }
       return mainClass
         ? this.#compilerModule.linkScalaJSAsync(allIR, mainClass)
         : this.#compilerModule.linkScalaJSModuleAsync(allIR);
     });
 
+    const files = result.files
+      ? [...result.files].map((file) => ({ name: file.name, bytes: file.bytes }))
+      : null;
+    const entry = files?.find((file) => file.name === result.jsFileName);
+
     return {
       target,
+      incremental,
       jsFileName: result.jsFileName,
-      code: target === "wasm" ? null : result.code,
-      files: target === "wasm" ? [...result.files].map((file) => ({ name: file.name, bytes: file.bytes })) : null,
+      // JavaScript output is consumed as source; WebAssembly as a set of files.
+      code: target === "wasm" ? null : (result.code ?? (entry ? new TextDecoder().decode(entry.bytes) : null)),
+      files: target === "wasm" ? files : null,
       output: lines.join("\n"),
       durationMs: now() - started,
     };

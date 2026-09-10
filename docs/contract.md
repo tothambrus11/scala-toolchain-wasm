@@ -54,15 +54,22 @@ Java API surface user code compiles against.
 
 | Export | Signature | Purpose |
 | --- | --- | --- |
-| `runScala3CompilerSJSAsync(args)` | `Promise<number>` | runs the compiler CLI; returns an exit code |
-| `linkScalaJSAsync(irFiles, mainClass)` | `Promise<{jsFileName, code}>` | links to JavaScript; `mainClass.main` runs on import |
-| `linkScalaJSModuleAsync(irFiles)` | `Promise<{jsFileName, code}>` | links to JavaScript with no entry point |
-| `linkScalaJSWasmAsync(irFiles, mainClass)` | `Promise<{jsFileName, files}>` | links to WebAssembly; returns every emitted file |
+| `runScala3CompilerSessionAsync(args)` | `Promise<number>` | **ours** - compiler CLI that keeps its classpath between calls |
+| `resetScala3CompilerSession()` | `void` | drops that cached classpath |
+| `setScalaJSRuntimeIR(irFiles)` | `void` | **ours** - hand the runtime IR over once per session |
+| `linkScalaJSSessionAsync(irFiles, mainClass, target)` | `Promise<{jsFileName, files}>` | **ours** - incremental link to `"wasm"` or JavaScript; returns every emitted file |
+| `resetScalaJSLinkerSession()` | `void` | drops the cached linkers |
+| `runScala3CompilerSJSAsync(args)` | `Promise<number>` | upstream; a fresh compiler per call |
+| `linkScalaJSAsync(irFiles, mainClass)` | `Promise<{jsFileName, code}>` | upstream; links to JavaScript |
+| `linkScalaJSModuleAsync(irFiles)` | `Promise<{jsFileName, code}>` | upstream; JavaScript, no entry point |
 
-`irFiles` are `{ path: string, bytes: Uint8Array }`. `linkScalaJSWasmAsync` comes from this
-repository's `src-sjs/`; the others are upstream. A distribution built without our sources will
-lack it, so feature-detect (`typeof module.linkScalaJSWasmAsync === "function"`) rather than
-assuming.
+`irFiles` are `{ path: string, bytes: Uint8Array }`. The exports marked **ours** come from this
+repository's `src-sjs/`; a distribution built without those sources has only the upstream ones
+and cannot target WebAssembly, so feature-detect
+(`typeof module.linkScalaJSSessionAsync === "function"`) rather than assuming.
+
+Pass the runtime IR through `setScalaJSRuntimeIR` once and then link with only the program's
+IR: passing 15 MB of runtime IR per link costs more than the link.
 
 Diagnostics are **not** returned: the compiler writes them to `console`. The host captures and
 parses them (see `host/src/diagnostics.js`). This is the ugliest part of the contract and the

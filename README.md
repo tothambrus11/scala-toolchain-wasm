@@ -58,6 +58,24 @@ console.log(result.output, result.diagnostics);
 The engine loads nothing until you call `init()`, and the manifest may live on another origin
 (a CDN or R2 bucket) — URLs inside it resolve relative to the manifest.
 
+Call `engine.warmUp()` after `init()`. The first compile of a session scans the classpath and
+the first link parses the runtime IR; doing that in the background turns a user's first
+edit-run from several seconds into the steady-state figures below.
+
+## Speed
+
+Measured in headless Chromium on a 4-core container (`node tests/profile.mjs`):
+
+| | first in a session | steady state |
+| --- | --- | --- |
+| compile | ~1.1 s (+~3 s classpath scan) | **~0.6 s** |
+| link | ~5.7 s | **~0.15 s** |
+| run | — | ~20 ms |
+
+Before this repository's compiler-side sources, the same numbers were ~6.5 s per compile and
+~2 s per link, on *every* edit — the classpath was re-scanned and the runtime IR re-marshalled
+each time. See [docs/patches.md](docs/patches.md).
+
 Browsers need WebAssembly JSPI: Chrome/Edge 137+. Unsupported engines get an error naming the
 missing features rather than a broken page.
 
@@ -89,6 +107,7 @@ the fork can move forward without merge conflicts.
 
 - [docs/contract.md](docs/contract.md) — manifest schema, module exports, host interfaces, versioning
 - [docs/patches.md](docs/patches.md) — every workaround this build carries, and why
+- [docs/divergence.md](docs/divergence.md) — what we maintain, what should go upstream, what to adopt
 - [docs/releasing.md](docs/releasing.md) — cutting a release, bumping the upstream pin
 
 ## Known limitations

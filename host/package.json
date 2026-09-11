@@ -1,6 +1,6 @@
 {
   "name": "scala-toolchain-wasm",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Browser host for the Scala 3 compiler and Scala.js linker compiled to WebAssembly",
   "type": "module",
   "main": "src/index.js",

@@ -146,13 +146,15 @@ object Main:
       assertIncludes(first.message, "Found:");
     },
   },
-  // The macro cases run last, for two reasons. One is ordinary: they cost ~80 s against
-  // everyone else's ~1 s, so failures in cheap checks should surface first. The other is a
-  // KNOWN LIMIT, not a fixed bug: with the macro case earlier in this list, the compile after
-  // it traps with "dereferencing a null pointer" and takes the renderer with it. The same
-  // sequence in isolation - macro compile, then a one-file plain compile, then a two-file one
-  // - passes every time, so it needs roughly ten prior compiles in the same page to show up.
-  // A long editing session that then meets a macro can presumably hit it. See docs/fork.md.
+  // The macro cases run last because they cost ~80 s against everyone else's ~1 s, so
+  // failures in cheap checks should surface first.
+  //
+  // They used to run last for a second reason - a compile placed after them trapped with
+  // "dereferencing a null pointer" and took the renderer with it - and that is now understood
+  // and fixed. It was never about macros: the linker was incremental, and a link whose program
+  // closure had grown since the previous link corrupted its state. A macro compile grows the
+  // closure, which is why it looked macro-shaped. See LinkerSession.scala; "survives an
+  // edit-run loop that grows the program" above is the test that pins it.
   {
     // The headline capability of this distribution, and the expensive one: expanding this
     // macro means the compiler links a second copy of itself with `showImpl` in it, imports
@@ -203,6 +205,43 @@ object Macros:
  * analysis. That is where correctness bugs would hide, so drive a session through a sequence
  * of edits and check each answer is about the current source, not a previous one.
  */
+/**
+ * The loop a person actually performs: warm up, run something, edit it, run it again.
+ *
+ * Nothing here tested this before, and it broke in the worst way - the third link trapped the
+ * Wasm instance and, because the JSPI continuation went with it, the promise never settled, so
+ * the page stopped responding rather than reporting anything. The trigger is a linked program
+ * whose closure *grows* between links (hello-world, then something using `(1 to n).map`), which
+ * is an ordinary first minute of use.
+ *
+ * `compile`-only checks cannot catch it: it lives in the linker.
+ */
+const runLoop = {
+  name: "survives an edit-run loop that grows the program",
+  async run(page) {
+    const steps = [
+      { source: '@main def hello(): Unit = println("plain")\n', expect: "plain" },
+      // Pulls in Range, StringContext and friends - a much larger closure than the above.
+      { source: '@main def hello(): Unit =\n  val xs = (1 to 5).map(x => x * x)\n  println(s"sum = ${xs.sum}")\n', expect: "sum = 55" },
+      { source: '@main def hello(): Unit =\n  val xs = (1 to 6).map(x => x * x)\n  println(s"sum = ${xs.sum}")\n', expect: "sum = 91" },
+      { source: '@main def hello(): Unit =\n  val xs = (1 to 7).map(x => x * x)\n  println(s"sum = ${xs.sum}")\n', expect: "sum = 140" },
+    ];
+
+    // Warming first is what the playground and the IDE both do on load.
+    await page.evaluate(() => globalThis.__engine.warmUp("js"));
+
+    for (const [index, step] of steps.entries()) {
+      const result = await page.evaluate(
+        source => globalThis.__engine.run({ "Main.scala": source }, { target: "js" }),
+        step.source,
+      );
+      assert(result.ok, `step ${index + 1} should compile:\n${result.compilerOutput}`);
+      assert(result.ran, `step ${index + 1} should run: ${result.error ?? ""}`);
+      assertIncludes(result.output, step.expect);
+    }
+  },
+};
+
 const editSequence = {
   name: "stays correct across repeated edits in one session",
   async run(page) {
@@ -292,15 +331,15 @@ try {
     if (!ok) failures++;
   }
 
-  {
+  for (const sequence of [editSequence, runLoop]) {
     const caseStarted = Date.now();
     total++;
     try {
-      await editSequence.run(page);
-      console.log(`PASS  ${editSequence.name}  (${((Date.now() - caseStarted) / 1000).toFixed(1)}s)`);
+      await sequence.run(page);
+      console.log(`PASS  ${sequence.name}  (${((Date.now() - caseStarted) / 1000).toFixed(1)}s)`);
     } catch (error) {
       failures++;
-      console.log(`FAIL  ${editSequence.name}\n      ${error.message.split("\n").join("\n      ")}`);
+      console.log(`FAIL  ${sequence.name}\n      ${error.message.split("\n").join("\n      ")}`);
     }
   }
 

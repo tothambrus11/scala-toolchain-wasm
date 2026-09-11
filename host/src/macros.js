@@ -14,16 +14,36 @@
  */
 
 /**
+ * Remove comments and string literals, so that what is left is code.
+ *
+ * This exists because `${` means two entirely different things in Scala: a splice inside a
+ * quote, and interpolation inside a string. `s"sum = ${xs.sum}"` is the single most ordinary
+ * line in a Scala program and has nothing to do with macros.
+ */
+function codeOnly(source) {
+  return source
+    .replace(/"""[\s\S]*?"""/g, '""')       // triple-quoted, including interpolated ones
+    .replace(/"(?:\\.|[^"\\\n])*"/g, '""')   // single-quoted, honouring \" escapes
+    .replace(/\/\*[\s\S]*?\*\//g, " ")      // block comments
+    .replace(/\/\/[^\n]*/g, " ");           // line comments
+}
+
+/**
  * Might this source define a quoted macro?
  *
- * Deliberately a text heuristic, matching the compiler's own: a splice `${` or a mention of
- * `scala.quoted`. It only decides whether to arm the machinery, so a false positive costs a
- * lazy fetch that then goes unused, and a false negative degrades to the error a compiler
- * without macro support would give. Parsing the file to be sure would mean compiling it,
- * which is the thing we are trying to set up.
+ * Deliberately a text heuristic - deciding properly would mean compiling the file, which is
+ * the thing we are trying to set up. It only decides whether to arm the macro machinery, so
+ * the two directions of error cost different things: a false positive fetches 22 MB and takes
+ * the slow compile path for a program that never needed it, and a false negative degrades to
+ * the error a compiler without macro support would give.
+ *
+ * Both signals are looked for in code, not in strings:
+ *   - a splice `${`, which outside a string literal can only be a quote splice;
+ *   - `scala.quoted`, which any macro *implementation* must import to name `Expr` or `Quotes`.
  */
 export function mayDefineQuotedMacro(source) {
-  return /\$\s*\{/.test(source) || source.includes("scala.quoted");
+  const code = codeOnly(source);
+  return /\$\s*\{/.test(code) || code.includes("scala.quoted");
 }
 
 /**

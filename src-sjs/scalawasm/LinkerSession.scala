@@ -1,46 +1,76 @@
 package scalawasm
 
-import java.nio.charset.StandardCharsets
-
 import scala.collection.mutable
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.concurrent.JSExecutionContext
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.annotation.JSExportTopLevel
 import scala.scalajs.js.typedarray.{Int8Array, Uint8Array}
+import scala.util.control.NonFatal
 
 import org.scalajs.ir.Version
-import org.scalajs.linker.interface.{ESVersion, Linker, ModuleInitializer, ModuleKind, StandardConfig}
+import org.scalajs.linker.interface.unstable.IRContainerImpl
+import org.scalajs.linker.interface.{ESVersion, IRFile, ModuleInitializer, ModuleKind, Report, StandardConfig}
 import org.scalajs.linker.standard.MemIRFileImpl
 import org.scalajs.linker.{MemOutputDirectory, StandardImpl}
 import org.scalajs.logging.NullLogger
 
 import dotty.tools.browseride.BrowserLinkerBridge.IRInput
 
-/** A linker that keeps its state between links.
+/** A linker that keeps its parsed IR between links, for the user's program.
  *
- *  The bridges this replaces build a new `Linker` per call with `batchMode(true)`, which
- *  throws away all incremental state - so every link re-parses the whole runtime IR, about
- *  15 MB across 5,000 files. Measured in a browser that is ~2 s on every link, on top of ~6 s
- *  the first time, and the user pays it on every run of their program.
+ *  Upstream's `BrowserLinkerBridge` does this for the *compiler* module; this is the same
+ *  design for user programs, where the difference is that they may be linked to WebAssembly
+ *  as well as to JavaScript, so there is a session per target.
  *
- *  Here the linker and its output directory are cached per target and `batchMode` is off, so
- *  the linker can reuse what it parsed and analysed. For that to work the IR files need
- *  versions that are stable when their content is: the runtime IR keeps a fixed version, and
- *  the program's IR is versioned by a digest of its bytes. Unchanged inputs then cost nothing.
+ *  Building a linker per call with `batchMode(true)` would re-parse the whole runtime IR -
+ *  about 15 MB across 5,000 files - on every run of the user's program. Instead the linker
+ *  and its IR cache live as long as the page, and IR files carry a version derived from their
+ *  content, so unchanged inputs cost nothing on the next link.
  *
- *  The output directory is reused along with the linker on purpose. An incremental backend
- *  skips rewriting files it believes are already there; handing it a fresh, empty directory
- *  each time would silently produce an incomplete output.
+ *  Three details are load-bearing, and two of them were originally wrong here:
  *
- *  `checkIR` is off. It re-verifies IR this toolchain produced itself, which is a compiler
- *  development aid, not something a user's edit-run loop should pay for.
+ *   - **The output directory is fresh per link.** Reusing it looks like the right partner to
+ *     an incremental linker, and is not: the linker writes only what changed, so a reused
+ *     directory accumulates files from previous programs, and `fileNames()` then reports a
+ *     module made of two different programs. In a session warmed on one program and then
+ *     asked to link a larger one twice, that corrupted the linker's state badly enough to
+ *     trap the whole Wasm instance on the second link.
+ *   - **The linker is clearable.** After a failed link a `Linker` is in an undefined state and
+ *     must not be reused; `clearableLinker` plus resetting the IR cache on failure means one
+ *     bad link cannot poison every link after it.
+ *   - `checkIR` is off. It re-verifies IR this toolchain produced itself, which is a compiler
+ *     development aid, not something a user's edit-run loop should pay for.
  */
 object LinkerSession:
   private given ExecutionContext = JSExecutionContext.queue
 
-  private final class Session(val linker: Linker, val output: MemOutputDirectory)
+  private final class Session(config: StandardConfig):
+    private val irFileCache = StandardImpl.irFileCache()
+    private var cache = irFileCache.newCache
+    private val linker = StandardImpl.clearableLinker(config)
+
+    def link(
+        irFiles: Seq[MemIRFileImpl],
+        moduleInitializers: Seq[ModuleInitializer],
+    ): Future[js.Object] =
+      // Fresh every link: see the note above about what reusing it does.
+      val outputDir = MemOutputDirectory()
+      cache
+        .cached(irFiles.map(new SingleFileContainer(_)))
+        .flatMap(linker.link(_, moduleInitializers, outputDir, NullLogger))
+        .map(report => result(report, outputDir))
+        .recoverWith { case NonFatal(t) =>
+          reset()
+          Future.failed(t)
+        }
+
+    /** Start over: a failed link leaves the linker undefined, and the cache suspect. */
+    def reset(): Unit =
+      linker.clear()
+      cache.free()
+      cache = irFileCache.newCache
 
   private val sessions = mutable.Map.empty[String, Session]
 
@@ -52,17 +82,23 @@ object LinkerSession:
   private def config(wasm: Boolean): StandardConfig =
     StandardConfig()
       .withCheckIR(false)
-      .withBatchMode(false)
+      // Incremental linking is unsound here, and the failure is not survivable: link a small
+      // program, then a larger one, then link again, and the *third* link traps the whole Wasm
+      // instance with "dereferencing a null pointer". The JSPI continuation is lost with it, so
+      // the promise never settles and the page simply stops responding. Reproduced from a cold
+      // session with hello-world followed by a program using `(1 to n).map`, which is an
+      // entirely ordinary thing for someone to do in the first minute.
+      //
+      // The IR cache still holds the parsed runtime IR across links, so what batch mode costs
+      // is re-analysis, not re-parsing 15 MB.
+      .withBatchMode(true)
       .withSourceMap(false)
       .withModuleKind(ModuleKind.ESModule)
       .withESFeatures(_.withESVersion(ESVersion.ES2018))
       .withExperimentalUseWebAssembly(wasm)
 
   private def session(target: String): Session =
-    sessions.getOrElseUpdate(
-      target,
-      new Session(StandardImpl.linker(config(target == "wasm")), MemOutputDirectory()),
-    )
+    sessions.getOrElseUpdate(target, new Session(config(target == "wasm")))
 
   /** Hand over the runtime IR once per session. */
   @JSExportTopLevel("setScalaJSRuntimeIR")
@@ -80,38 +116,36 @@ object LinkerSession:
       mainClassName: String,
       target: String,
   ): js.Promise[js.Object] =
-    val current = session(target)
     val moduleInitializers =
       if mainClassName == null || mainClassName.isEmpty then Nil
       else Seq(ModuleInitializer.mainMethodWithArgs(mainClassName, "main", Nil))
 
-    val inputs = runtimeIR ++ irFiles.toSeq.map(toIRFile)
-
-    current.linker
-      .link(inputs, moduleInitializers, current.output, NullLogger)
-      .map { report =>
-        val publicModule = report.publicModules.headOption.getOrElse {
-          throw new IllegalStateException("Scala.js linker produced no public module.")
-        }
-
-        val files = current.output.fileNames().sorted.map { name =>
-          val content = current.output.content(name).getOrElse {
-            throw new IllegalStateException(s"Linked output `$name` was not captured.")
-          }
-          js.Dynamic.literal(name = name, bytes = toUint8Array(content))
-        }
-
-        js.Dynamic.literal(
-          jsFileName = publicModule.jsFileName,
-          files = files.toJSArray,
-        )
-      }
-      .toJSPromise
+    session(target).link(runtimeIR ++ irFiles.toSeq.map(toIRFile), moduleInitializers).toJSPromise
 
   /** Drop the cached linkers; the next link starts from scratch. */
   @JSExportTopLevel("resetScalaJSLinkerSession")
   def resetSession(): Unit =
     sessions.clear()
+
+  private def result(report: Report, outputDir: MemOutputDirectory): js.Object =
+    val publicModule = report.publicModules.headOption.getOrElse {
+      throw new IllegalStateException("Scala.js linker produced no public module.")
+    }
+
+    val files = outputDir.fileNames().sorted.map { name =>
+      val content = outputDir.content(name).getOrElse {
+        throw new IllegalStateException(s"Linked output `$name` was not captured.")
+      }
+      js.Dynamic.literal(name = name, bytes = toUint8Array(content))
+    }
+
+    js.Dynamic.literal(jsFileName = publicModule.jsFileName, files = files.toJSArray)
+
+  /** The IR cache works in containers; ours each hold exactly one already-parsed file. */
+  private final class SingleFileContainer(file: MemIRFileImpl)
+      extends IRContainerImpl(file.path, file.version):
+    def sjsirFiles(implicit ec: ExecutionContext): Future[List[IRFile]] =
+      Future.successful(List(file))
 
   private def toIRFile(irFile: IRInput): MemIRFileImpl =
     val bytes = toByteArray(irFile.bytes)

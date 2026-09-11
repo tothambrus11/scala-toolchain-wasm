@@ -1,3 +1,9 @@
+> **Resolved.** This was not a macro bug. Our linker ran incrementally, and a link whose
+> program closure had grown since the previous link corrupted its state; a macro compile
+> grows the closure, which is what made it look macro-shaped. Plain hello-world followed by
+> a program using `(1 to n).map` reproduces it identically. Fixed by linking in batch mode.
+> Kept because the *linker* behaviour is still worth reporting upstream - see below.
+
 # A compile after a macro compile traps, once a page has done enough work
 
 Against `univalence-xyz/scala3-on-wasm` @ `8fdbb99d312de6935bb7482624245caafac27b66`

@@ -395,6 +395,12 @@ export class ScalaToolchain {
   }
 
   async #link(irFiles, { mainClass = null, target = "js" } = {}) {
+    // The target crosses into Scala as a string. Anything else - an options object passed
+    // where a string was meant, say - surfaces as "illegal cast" from deep inside the Wasm
+    // module, which says nothing about the caller's mistake.
+    if (target !== "js" && target !== "wasm") {
+      throw new TypeError(`link target must be "js" or "wasm", got ${JSON.stringify(target)}`);
+    }
     if (target === "wasm" && !this.supportsWasmTarget) {
       throw new Error(
         "This toolchain build cannot link to WebAssembly: it has no linkScalaJSSessionAsync export. Rebuild it from scala-toolchain-wasm.",

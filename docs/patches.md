@@ -89,6 +89,22 @@ A/B measurement, which still reports through `console`.
 **Upstreamable:** upstream did it. This was the highest-fragility thing we owned, because a
 rendering format nobody agreed to was load-bearing.
 
+## 6a. The user-program linker cannot run incrementally
+
+**Where:** `src-sjs/scalawasm/LinkerSession.scala`
+**Symptom:** the page stops responding. A link traps with `dereferencing a null pointer`, and
+because the JSPI continuation is lost with it the promise never settles - so there is no error,
+no rejection, and nothing in the console beyond the trap.
+**Trigger:** a link whose program closure has grown since the previous link, then one more
+link. Concretely: run hello-world, then a program using `(1 to n).map`, then edit and run it.
+Two links of the same program shape never fail, which is why the conformance suite missed it
+for so long - it linked a different program each time and only ever compiled in a loop.
+**Fix:** `batchMode(true)`. The IR cache still holds the parsed runtime IR across links, so
+what this costs is re-analysis, not re-parsing 15 MB: ~0.9 s per link against ~0.15 s
+incremental. An unsound 0.15 s is not worth having.
+**Upstreamable:** it should be *reported* - upstream links user programs the same way, and
+their own linker for the compiler module has the same shape. Ours is the reproduction.
+
 ## 7. Errors crossing the Wasm boundary are not always `Error`s
 
 **Where:** `host/src/worker.js`

@@ -86,11 +86,10 @@ The host emits a `macros` progress stage before that minute begins, so a UI can 
 happening instead of appearing to hang. Editing the macro invalidates the linked compiler and
 costs the minute again; editing anything else does not.
 
-**A known limit.** In a page that has already run roughly ten compiles, the compile *after* a
-macro compile traps with `dereferencing a null pointer` and takes the renderer down with it.
-The same sequence from a fresh page - macro compile, then a plain compile, then another -
-passes every time, so this needs an accumulation of prior work to appear. The conformance
-suite runs its macro cases last for this reason, which keeps the suite green without pretending
-the problem is solved; a long editing session that then meets a macro can presumably still hit
-it. Unresolved. [`reports/macro-followup-trap.md`](../reports/macro-followup-trap.md) writes it
-up for upstream, including what does *not* cause it.
+**A limit that turned out not to be about macros.** A compile placed after a macro compile
+used to trap with `dereferencing a null pointer` and take the renderer with it. That is fixed,
+and the cause was ours, not the fork's: our linker ran incrementally, and a link whose program
+closure had *grown* since the previous link corrupted its state. A macro compile grows the
+closure, which is why it looked macro-shaped - but plain hello-world followed by a program
+using `(1 to n).map` reproduced it just as reliably. `LinkerSession` now links in batch mode;
+see [patches.md](patches.md).

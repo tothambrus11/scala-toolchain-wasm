@@ -51,6 +51,14 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
     git clone --filter=blob:none "$UPSTREAM_URL" "$CHECKOUT_DIR"
   fi
 
+  # A reused checkout is not clean: `prepareBrowserIDE` writes its output into tracked paths
+  # (compiler/browser-ide/assets/...), so `git checkout` refuses to switch refs over them, and
+  # the upstream URL may have changed since the cache was written. Both are fatal in CI and
+  # invisible locally, where the ref usually has not moved. Reset tracked files - the build
+  # regenerates them, our injected sources are untracked, and sbt's target/ is ignored.
+  git -C "$CHECKOUT_DIR" remote set-url origin "$UPSTREAM_URL"
+  git -C "$CHECKOUT_DIR" reset --hard --quiet
+
   git -C "$CHECKOUT_DIR" fetch --filter=blob:none origin "$UPSTREAM_REF" 2>/dev/null ||
     git -C "$CHECKOUT_DIR" fetch --filter=blob:none origin
   git -C "$CHECKOUT_DIR" checkout --detach "$UPSTREAM_REF"

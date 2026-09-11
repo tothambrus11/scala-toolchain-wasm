@@ -116,8 +116,14 @@ WRAPPER
 cp "$REPO_ROOT/host/src"/*.js "$DIST_DIR/host/"
 
 # Version metadata: what a consumer needs to know about this distribution.
-scala_version=$(basename "$(ls -d "$CHECKOUT_DIR"/compiler/target/scala3-compiler-nonbootstrapped/scala-* 2>/dev/null | head -1)" 2>/dev/null || echo "scala-unknown")
-scala_version=${scala_version#scala-}
+# Read the version from the build definition, not from a `target/scala-*` directory: those
+# name the *bootstrap* compiler, and a checkout reused across branches keeps stale ones, so
+# the old detection cheerfully reported 3.8.2 for a 3.8.3 build. `baseVersion` is the compiler
+# being built - a literal during a release cycle, otherwise an alias for `developedVersion`.
+scala_version=$(sed -n 's/^[[:space:]]*val baseVersion[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CHECKOUT_DIR/project/Build.scala" | head -1)
+[[ -n "$scala_version" ]] ||
+  scala_version=$(sed -n 's/^[[:space:]]*val developedVersion[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CHECKOUT_DIR/project/Build.scala" | head -1)
+scala_version=${scala_version:-unknown}
 scalajs_version=$(grep -oE 'sbt-scalajs" % "[^"]+"' "$CHECKOUT_DIR/project/plugins.sbt" 2>/dev/null | grep -oE '[0-9][^"]*' | head -1 || true)
 # `java -version` writes to stderr, and a JAVA_TOOL_OPTIONS banner can precede the version.
 jdk_version=$(java -version 2>&1 | grep -v '^Picked up' | head -1 | grep -oE '"[^"]+"' | tr -d '"' || echo unknown)

@@ -1,129 +1,95 @@
 # The compiler fork
 
 The compiler in this distribution is not stock dotty. It is built from
-[`pgilliar/scala3-compiler-sjs`](https://github.com/pgilliar/scala3-compiler-sjs), a fork that
-makes the Scala 3 compiler cross-compilable with Scala.js. This is the single largest thing
-this project depends on and does not control, so it is worth knowing what it actually changes.
+[`univalence-xyz/scala3-on-wasm`](https://github.com/univalence-xyz/scala3-on-wasm), a fork of
+dotty that cross-compiles the Scala 3 compiler with Scala.js so it can run in a browser. This
+is the single largest thing this project depends on and does not control, so it is worth
+knowing what it actually is.
 
-Handily, the fork's `main` branch is a mirror of `scala/scala3`, so its own delta is exactly
-`git log origin/main..origin/<branch>`.
+## Who maintains it, and is it going anywhere
 
-## Branches
+The work started as [`pgilliar/scala3-compiler-sjs`](https://github.com/pgilliar/scala3-compiler-sjs)
+by Patrick Gilliard (EPFL). Sébastien Doeraene - who leads Scala.js - called its `macro` branch
+"a prototype of that... hopefully we will be able to merge it in the coming month or two" in
+[the one public thread on browser-hosted dotty](https://contributors.scala-lang.org/t/scala-3-compiler-plugins-embedded-in-browser-with-wasm/7472).
+So this is the official effort rather than a side project. It is **not upstream yet**: as of
+this writing `scala/scala3` has no `compiler/src-sjs/`, and no PR proposes one. (One piece was
+upstreamed on its own - [#25869](https://github.com/scala/scala3/pull/25869), the
+type-directed `Constant` construction, in 3.9.0.)
 
-| Branch | Tip | What it is |
+`univalence-xyz/scala3-on-wasm` continues it. Its `main`, `base-sjs-compiler`, `constants`,
+`browser` and `macro` branches are **byte-identical SHAs** to Gilliard's - it is a strict
+continuation, by Yichen Xu (EPFL LAMP), not a divergence.
+
+## Which branch we pin, and why
+
+| Branch | Owner | What it adds |
 | --- | --- | --- |
-| `main` | tracks `scala/scala3` | upstream mirror, no fork changes |
-| `base-sjs-compiler` | 2026-04-20 | the compiler cross-compiled, without the browser demo |
-| `constants` | 2026-04-20 | a review branch for one piece of the above |
-| **`browser`** | 2026-04-15 | **what we pin**: `base-sjs-compiler` plus a browser IDE demo and the linker bridge |
-| `macro` | 2026-06-08 | the newest work: macro support, an in-Scala worker, a linker cache. See "Where it is going" |
+| `browser` | Gilliard | the browser IDE demo and a JS-only linker bridge |
+| `macro` | Gilliard | **quoted macros**, an in-Scala worker, a linker cache |
+| `dist` | Xu | structured diagnostics, npm packaging, readable worker errors |
+| **`js-3.8.3`** | Xu | **what we pin**: all of the above, ported onto *released* Scala 3.8.3 |
 
-## What `browser` changes, against dotty
+The other branches track dotty's `main`, so they build a nightly (3.8.4-RC1). `js-3.8.3` is
+the same stack rebased onto a released compiler, which is what a toolchain other people use
+should be built from. Xu maintains `js-3.8.0` through `js-3.8.3` this way, which is a rebase
+story the original fork does not have.
 
-**238 files, +20,976 / −612.** Almost all of it is additive: the fork is careful, and it shows.
+## What we get from it that we used to maintain ourselves
 
-### 1. Splitting the compiler by platform
+Three of our patches went away when we moved to this fork. They are worth listing, because the
+lesson is that most of what we invented had already been solved better upstream:
 
-The bulk of the diff is `compiler/src/…` files moving to `compiler/src-jvm/…` — 19 files of the
-JVM bytecode backend, plus `dotty.tools.io`, the scripting driver and the sbt bridge. Those are
-JVM-only; moving them out lets the Scala.js build compile everything that is left.
-
-Where behaviour must differ rather than disappear, the fork uses a two-branch inline:
-
-```scala
-transparent inline def platformDependent[A](inline jvm: A)(inline js: A): A = js
-```
-
-`compiler/src-sjs/…/PlatformDependent.scala` returns the JS branch; the JVM build has the
-mirror image. Call sites read `platformDependent(realThing)(fallback)`, and the unused branch
-never reaches the output. It is the least invasive way to fork a compiler this size, and it is
-why the diff is 612 deletions rather than thousands.
-
-### 2. A file system and classpath that do not assume a JVM
-
-`compiler/src-sjs/dotty/tools/io/` reimplements 14 files of dotty's IO layer for the browser:
-`AbstractFile`, `Path`, `PlainFile`, `ZipArchive`, `JarArchive`, `ClassPath`, `FileWriters`,
-plus `HostFS` and `JSPath`, which are new. `HostFS` is what reaches
-`globalThis.__scala3CompilerSJSHostFS` — the contract our host implements. Alongside it,
-`compiler/src-sjs/…/dotc/classpath/` reimplements classpath scanning over that file system.
-
-This is the part that makes a browser-hosted compiler possible at all, and the part most
-likely to drift from upstream.
-
-### 3. A JS entry point
-
-`compiler/src-sjs/dotty/tools/dotc/`: `MainJS` (exports `runScala3CompilerSJSAsync`),
-`JSDriver`, `JSContextBase`, `JSScalacCommand`, and JS-friendly replacements for a handful of
-utilities (`WeakHashSet`, `PlatformWeakMap`, a `PushbackReader`). The compiler runs
-asynchronously because reading jars in a browser is async — hence the JSPI requirement.
-
-### 4. `interfaces-sjs`
-
-Dotty's `interfaces` module is plain Java. The fork adds a Scala.js twin, `interfaces-sjs`
-(8 files), so the Scala.js build has the same API without Java sources.
-
-### 5. Small changes to shared compiler code
-
-About 40 files under `dotc/core`, `dotc/transform`, `dotc/typer`, `dotc/config` and
-`dotc/reporting` are modified in place — mostly to route through `platformDependent`, to drop a
-reflective call, or to avoid an API Scala.js lacks.
-
-### 6. A browser IDE demo, and the build that feeds it
-
-`compiler/browser-ide/` is a small demo page and worker, and `project/SjsCompilerHelloWorld.scala`
-adds the `prepareBrowserIDE` sbt task that assembles the assets we consume. Our build calls
-that task and then re-stages its output — see [patches.md](patches.md) for the one place its
-output is wrong.
-
-## What this means for us
-
-- **The fork is additive and disciplined**, so our own compiler-side sources drop into
-  `compiler/src-sjs/` and compile without patching anything. That is the whole reason this
-  project can track it cheaply.
-- **The risky surface is the IO and classpath layer.** A dotty change to `AbstractFile` or
-  classpath scanning is what would break a rebase, not the backend split.
-- **`browser` is not being developed further**; the work moved to `macro`.
-
-## Where it is going: the `macro` branch
-
-`macro` (2026-06-08, two months newer than our pin) is 28 commits on dotty and contains, by its
-own commit messages: a macro scanner, `.sjsir` emission and relinking for macros, the browser
-worker rewritten *in Scala*, a linker cache, and validation/compilation test suites.
-
-**We trial-built it** with our `src-sjs/` injected, and ran the conformance suite against the
-result. What that showed:
-
-| | our pin (`browser`) | `macro` |
+| We had | They have | Why theirs is better |
 | --- | --- | --- |
-| builds with our sources injected | yes | **yes, unchanged** |
-| conformance (11 checks) | pass | **pass** |
-| `compiler/main.wasm` | 31.7 MB | **11 MB** |
-| a program using a quoted macro | a clean compiler error | **an opaque crash** |
+| `CompilerSession.scala` - a `Platform` subclass smuggling a `ClassPath` between `ContextBase` instances | `retainPlatformBetweenRuns` on `ContextBase` | Done from inside the compiler, where it can be correct. Ours risked leaking symbols between runs; theirs does not. |
+| A rebuilt `scala-lib.jar`, because upstream staged a `.sjsir`-only one | a jar with `.class` + `.tasty` | It was a plain bug and they fixed it. We now take their jar and assert `scala/Predef.tasty` is in it. |
+| `diagnostics.js` - parsing `-- [E007] Type Mismatch Error: file:line:col` back out of terminal output | `compileScala3SjsAsync`, returning diagnostics as data | Severity, code, name, message and a full *range* - ANSI-stripped, never `undefined`. A rendering format nobody agreed to was our most fragile dependency. |
 
-Two things follow, and they point in opposite directions.
+Our remaining compiler-side code is one bridge file. Upstream drives its warm sessions and its
+macro relink loop from an in-Scala worker of its own; we drive them from our host, so the
+bridge exports what upstream implements and adds nothing.
 
-**It drops in.** Our `CompilerSession` and `LinkerSession` compile against it as-is, and it
-still exports the three entry points our host needs, so everything we test today keeps working.
+## How a macro expands in a browser
 
-**But macros still would not.** The branch supports macros through a different protocol: the
-compiler raises a missing-entry-point interrupt, and the *host* is expected to relink that
-macro's `.sjsir` into an ES module, publish it at a URL (`__scala3CompilerSJSPublicModuleUrls`),
-`import()` it back, and restart the compile - up to eight times. That loop lives behind
-`runScala3SjsMacroSessionAsync`, alongside `startScala3BrowserIDEWorker`, their in-Scala worker.
-Our host calls `runScala3CompilerSessionAsync`, which does not run the loop, so a macro program
-hits the interrupt with nobody to answer it. Today the pinned build says
-"quoted macro expansion is not supported by scala3-compiler-sjs" and stops, which is worse in
-principle and much better in practice.
+Worth understanding, because it explains the cost. Expanding a quoted macro means *running*
+the macro implementation, and in a browser nothing runs until it is linked. So:
 
-So the pin stays where it is. Taking macro support means implementing their relink protocol in
-our host - real work, worth doing deliberately, tracked in [divergence.md](divergence.md).
+1. The compiler compiles the sources and emits the macro's `.sjsir` like any other class.
+2. Reaching the splice, it finds no linked entry point for it, and interrupts itself.
+3. The **host** is asked to relink: the compiler's own IR (22 MB, shipped as
+   `compiler-sjsir.zip`) plus the macro's, into an ES module.
+4. That module - a second, complete compiler with the macro in it - is imported from a blob
+   URL, and the compile restarts inside it. Up to eight rounds.
 
-### One thing worth stealing sooner
+This is why the host arms macro support only for sources that mention `${` or `scala.quoted`:
+a program without macros must not pay for a 22 MB fetch and a second linked compiler. It is
+also why editing a macro drops the linked module - expanding a *stale* macro would be a wrong
+answer that looks like a right one.
 
-The 31.7 MB → 11 MB difference is not macros. Their `prepareBrowserIDE` links the compiler with
-`fullLinkJS`; ours (`browser`, `project/Build.scala:1912`) uses `fastLinkJS`. That is a two-line
-change to the upstream build we could carry as a patch, and it is by far the largest asset a
-visitor downloads. It is not free: full optimization costs build time, and compiles in the
-trial build ran perhaps 30% slower than the pinned ones - close enough to noise, on a loaded
-machine, that it needs a proper A/B before anyone believes either number. Measure it before
-taking it.
+Upstream's Node batch harness skips same-run macro tests because it has no linker to relink
+with. The browser path, which is ours, does have one; that is the whole point of
+`BrowserMacroLinkerRuntime`.
+
+## What macros cost, and one limit worth knowing
+
+Linking a second compiler is not cheap, and the numbers are worth stating plainly:
+
+| | |
+| --- | --- |
+| first compile of a program that defines a macro | **~70-80 s** |
+| the same compile again, macro unchanged | ~0.2 s (the linked compiler is cached by content) |
+| any compile of a program with no macros | ~40-300 ms, unaffected |
+| extra download, first macro use only | 22 MB (`compiler-sjsir.zip`) |
+
+The host emits a `macros` progress stage before that minute begins, so a UI can say what is
+happening instead of appearing to hang. Editing the macro invalidates the linked compiler and
+costs the minute again; editing anything else does not.
+
+**A known limit.** In a page that has already run roughly ten compiles, the compile *after* a
+macro compile traps with `dereferencing a null pointer` and takes the renderer down with it.
+The same sequence from a fresh page - macro compile, then a plain compile, then another -
+passes every time, so this needs an accumulation of prior work to appear. The conformance
+suite runs its macro cases last for this reason, which keeps the suite green without pretending
+the problem is solved; a long editing session that then meets a macro can presumably still hit
+it. Unresolved, and worth reporting upstream with a minimal reproduction.

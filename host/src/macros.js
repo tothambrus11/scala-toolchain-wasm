@@ -54,3 +54,18 @@ export function macroPackages(sources) {
   }
   return [...packages].sort();
 }
+
+/**
+ * A key identifying the macro-defining sources of a compile, exactly.
+ *
+ * Lengths are interleaved with the content so that no two different sets of sources can
+ * produce the same key by concatenation - the cheap trick that makes this safe to compare
+ * without hashing.
+ */
+export function macroSourceKey(files) {
+  return Object.entries(files)
+    .filter(([, source]) => mayDefineQuotedMacro(source))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, source]) => `${name.length}:${name}${source.length}:${source}`)
+    .join("");
+}

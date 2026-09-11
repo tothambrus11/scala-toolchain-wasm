@@ -41,6 +41,31 @@ object CompilerSession:
     else
       MainJS.runBrowserSessionWithPhaseTimingAsync(setupArgs, sourcePaths, ignoreTiming)
 
+  /** Compile, and report diagnostics as data rather than as console output.
+   *
+   *  The compiler renders diagnostics for a terminal, and until this existed a browser host
+   *  had to parse that rendering back into structure - matching on `-- [E007] Type Mismatch
+   *  Error: file:line:col` and hoping the format held. This returns
+   *  `{exitCode, hasErrors, errorCount, warningCount, diagnostics}`, where each diagnostic
+   *  carries a severity, a code, a message, and a *range* (`line`/`column` through
+   *  `endLine`/`endColumn`, plus offsets), all ANSI-stripped and never `undefined`.
+   *
+   *  Same macro rule as `runScala3CompilerSessionAsync`: the relink loop costs a linked
+   *  second compiler, so it runs only when the sources may define a macro.
+   */
+  @JSExportTopLevel("compileScala3SessionAsync")
+  def compileAsync(
+      setupArgs: js.Array[String],
+      sourcePaths: js.Array[String],
+      macrosPresent: Boolean,
+  ): js.Promise[js.Dynamic] =
+    // Not `null`: the macro path hands this straight to `recordDuration` without checking,
+    // so a null callback becomes "x is not a function" several frames deep in the relink loop.
+    if macrosPresent then
+      MainJS.compileBrowserSessionWithRetainedMacroCompilerStructuredAsync(setupArgs, sourcePaths, ignoreTiming)
+    else
+      MainJS.compileBrowserSessionStructuredAsync(setupArgs, sourcePaths, ignoreTiming)
+
   /** Install the machinery a macro expansion needs, and hand it the compiler's own IR.
    *
    *  Expanding a quoted macro in a browser means *running* the macro implementation, which
@@ -50,21 +75,21 @@ object CompilerSession:
    */
   @JSExportTopLevel("installScala3MacroRuntimeAsync")
   def installMacroRuntime(
-      compilerIRZipBytes: Uint8Array,
-      compilerIRFiles: js.Array[BrowserLinkerBridge.IRInput],
+      compilerIRBytes: js.Function0[js.Promise[Uint8Array]],
+      compilerIRFiles: js.Function0[js.Promise[js.Array[BrowserLinkerBridge.IRInput]]],
       jszipWrapperUrl: String,
   ): js.Promise[Unit] =
-    val bytes: js.Function0[js.Promise[Uint8Array]] = () => js.Promise.resolve[Uint8Array](compilerIRZipBytes)
-    val files: js.Function0[js.Promise[js.Array[BrowserLinkerBridge.IRInput]]] =
-      () => js.Promise.resolve[js.Array[BrowserLinkerBridge.IRInput]](compilerIRFiles)
+    // Both are suppliers rather than values, because the inflated compiler IR is far larger
+    // than the archive it comes from and is needed only when a macro is actually relinked.
+    // Who holds it, and for how long, is the host's decision to make.
     val link: js.Function1[js.Array[BrowserLinkerBridge.IRInput], js.Promise[js.Dynamic]] =
       irFiles => BrowserLinkerBridge.linkCompilerModuleAsync(irFiles).asInstanceOf[js.Promise[js.Dynamic]]
 
     BrowserMacroLinkerRuntime.install(
       js.Dynamic
         .literal(
-          compilerIRBytes = bytes,
-          compilerIRFiles = files,
+          compilerIRBytes = compilerIRBytes,
+          compilerIRFiles = compilerIRFiles,
           linkCompilerModule = link,
           jszipWrapperUrl = jszipWrapperUrl,
           recordTiming = ignoreTiming,

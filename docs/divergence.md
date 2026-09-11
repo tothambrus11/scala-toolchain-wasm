@@ -40,10 +40,10 @@ the measurements. Two items fall out of it:
 
 | What | Disposition | Notes |
 | --- | --- | --- |
-| `src-sjs/scalawasm/CompilerSession.scala` | **Upstream** | Caches the classpath index between compiles: ~6.5 s → ~0.6 s per compile. Nothing about it is specific to us; any browser host of this compiler wants it. |
+| ~~`src-sjs/scalawasm/CompilerSession.scala`~~ (the caching one) | **Adopted** | Upstream's `retainPlatformBetweenRuns` does this from inside the compiler, where it can be correct; our version smuggled a `ClassPath` between `ContextBase` instances from outside. What is left under that name is a bridge: it exports the session, structured-compile and macro entry points upstream implements but does not expose to JavaScript, because it drives them from an in-Scala worker of its own. |
 | `src-sjs/scalawasm/LinkerSession.scala` | **Upstream** | Persistent, incremental linker plus a one-time runtime-IR handoff: ~2 s → ~0.15 s per link. Supersedes the fork's `BrowserLinkerBridge`, and adds the WebAssembly target it lacks. |
 | ~~`WasmLinkerBridge.scala`~~ | **Deleted** | `LinkerSession` covers both targets; keeping a second linking path was pure overhead. |
-| The `scala-lib.jar` staging fix in `scripts/build.sh` | **Upstream (bug)** | `prepareBrowserIDE` stages a `.sjsir`-only jar as the compile-time classpath, so a clean build cannot resolve `scala.Predef`. This is a plain bug and the highest-value thing to send back. |
+| ~~The `scala-lib.jar` staging fix~~ | **Fixed upstream** | Their jar now carries `.class` + `.tasty`. We take it and assert `scala/Predef.tasty` is present, because the failure it causes (`Not found: type Unit`) points nowhere near the cause. |
 
 If all four landed upstream, `src-sjs/` would be empty and `build.sh` would be a download and a
 staging step.
@@ -52,7 +52,7 @@ staging step.
 
 | What | Disposition | Notes |
 | --- | --- | --- |
-| `host/src/diagnostics.js` | **Upstream, then delete** | Parses the compiler's console output because there is no structured reporter across the Wasm boundary. The format is a de-facto API nobody agreed to; a reporter that returns `{severity, file, line, column, message}` would delete this file. Highest-fragility item we own. |
+| `host/src/diagnostics.js` | **Superseded upstream** | It parsed the compiler's console rendering, a de-facto API nobody agreed to, and was the most fragile thing we owned. `compileScala3SjsAsync` now returns diagnostics as data - severity, code, name, message and a *range*. The file survives only for the stateless entry point used in A/B measurement, which still reports through `console`. |
 | `host/src/memory-fs.js` | **Maintain** | Implements the compiler's host-FS contract (12 sync methods). [`memfs`](https://github.com/streamich/memfs) solves this generally, but we would still wrap it for `cwd()` and byte semantics, and it is ~200 KB against 240 lines. Revisit if the file-system surface grows into a real project model. |
 | `host/src/zip.js`, `jszip-compat.js` | **Maintain** | The compiler bundle imports a JSZip-shaped object *by hard-coded path*. Upstream should accept an injected reader instead — worth proposing. Until then ours is ~190 lines over `DecompressionStream`, versus 370 KB of vendored JSZip, and it inflates entries lazily (`rt.jar` is 15 MB). |
 | `host/src/module-loader.js` | **Maintain** | Rewrites the linker's relative references to blob URLs so output can run from memory. Scala.js could offer "instantiate from memory" upstream, but this is genuinely host-specific. |

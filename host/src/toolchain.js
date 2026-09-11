@@ -2,7 +2,7 @@ import { VirtualFileSystem } from "./memory-fs.js";
 import { installCompressedAssetFetch } from "./compressed-assets.js";
 import { readZipEntries } from "./zip.js";
 import { parseDiagnostics } from "./diagnostics.js";
-import { macroPackages } from "./macros.js";
+import { macroPackages, macroSourceKey } from "./macros.js";
 
 /**
  * This runtime's version. It ships inside a distribution, so it should always equal the
@@ -45,13 +45,17 @@ export class ScalaToolchain {
   #runtimeIRShared = false;
   #macroRuntime = null;
   #macroArtifacts = null;
+  #macroSourceKey = null;
   #stateless = false;
   // The compiler owns one virtual workspace, so compiles must not overlap - a background
   // warm-up would otherwise clear the directory a user's compile is reading.
   #queue = Promise.resolve();
 
-  constructor({ compilerModule, manifest, fs, stateless = false }) {
+  constructor({ compilerModule, manifest, fs, stateless = false, onProgress = () => {} }) {
     this.#compilerModule = compilerModule;
+    // Kept past load(): macro support does minutes of work on first use, and a UI that
+    // cannot say so just looks frozen.
+    this.onProgress = onProgress;
     this.#manifest = manifest;
     this.fs = fs;
     // Escape hatch: force the stateless entry point, for A/B measurement or if a warm
@@ -91,7 +95,7 @@ export class ScalaToolchain {
     onProgress("compiler");
     const compilerModule = await import(resolve(manifest.compilerModule));
 
-    const toolchain = new ScalaToolchain({ compilerModule, manifest, fs, stateless });
+    const toolchain = new ScalaToolchain({ compilerModule, manifest, fs, stateless, onProgress });
     toolchain.runtimeIRUrl = resolve(manifest.runtimeIR);
     // Only macro compiles need these, so they are recorded now and fetched on demand.
     toolchain.compilerIRUrl = manifest.compilerIR ? resolve(manifest.compilerIR) : null;
@@ -141,15 +145,20 @@ export class ScalaToolchain {
     const setupArgs = ["-classpath", this.classpath, "-d", OUTPUT_DIR, ...options];
 
     const macros = this.supportsMacros ? macroPackages(Object.values(files)) : [];
-    if (macros.length > 0) await this.#armMacros(macros);
-    else this.#disarmMacros();
+    if (this.supportsMacros) await this.#syncMacroState(files, macros);
 
     const started = now();
-    const { result: exitCode, lines } = await captureConsole(() =>
+    const { result, lines } = await captureConsole(() =>
       this.#runCompiler(setupArgs, sourcePaths, macros.length > 0),
     );
 
-    const { diagnostics, errorCount, warningCount } = parseDiagnostics(lines);
+    // A build that reports diagnostics as data tells us severity, code and a *range*
+    // directly. Only an older one leaves us reading the compiler's terminal rendering back
+    // into structure, which is what `parseDiagnostics` is for.
+    const { exitCode, diagnostics, errorCount, warningCount } =
+      typeof result === "object" && result !== null
+        ? structuredCompilation(result)
+        : { exitCode: result, ...parseDiagnostics(lines) };
     const irFiles = exitCode === 0
       ? fs.listFiles(OUTPUT_DIR)
           .filter((path) => path.endsWith(".sjsir"))
@@ -162,7 +171,11 @@ export class ScalaToolchain {
       diagnostics,
       errorCount,
       warningCount,
-      output: lines.join("\n"),
+      // With structured diagnostics the compiler prints nothing, so this would be empty and
+      // every caller that shows "the compiler's output" would show a blank panel. Each
+      // diagnostic carries the rendering the compiler *would* have printed; joining them
+      // reproduces it, so nothing downstream has to know which channel it came from.
+      output: lines.length > 0 ? lines.join("\n") : diagnostics.map((d) => d.text).filter(Boolean).join("\n\n"),
       irFiles,
       entryPoints: findEntryPoints(irFiles.map((file) => file.path)),
       durationMs: now() - started,
@@ -176,10 +189,18 @@ export class ScalaToolchain {
    * distribution provides it.
    */
   #runCompiler(setupArgs, sourcePaths, macrosPresent) {
+    if (!this.#stateless && typeof this.#compilerModule.compileScala3SessionAsync === "function") {
+      return this.#compilerModule.compileScala3SessionAsync(setupArgs, sourcePaths, macrosPresent);
+    }
     if (!this.#stateless && typeof this.#compilerModule.runScala3CompilerSessionAsync === "function") {
       return this.#compilerModule.runScala3CompilerSessionAsync(setupArgs, sourcePaths, macrosPresent);
     }
     return this.#compilerModule.runScala3CompilerSJSAsync([...setupArgs, ...sourcePaths]);
+  }
+
+  /** Whether diagnostics arrive as data rather than as text to be parsed. */
+  get structuredDiagnostics() {
+    return typeof this.#compilerModule.compileScala3SessionAsync === "function";
   }
 
   /** Whether this build can expand quoted macros in the browser. */
@@ -199,7 +220,33 @@ export class ScalaToolchain {
    * interrupts itself, has us link it, and re-enters. Registering the output directory is
    * therefore all the host has to say about where to look.
    */
-  async #armMacros(packages) {
+  /**
+   * Bring the compiler's macro state in line with the sources about to be compiled.
+   *
+   * A linked macro compiler is a *retained module*, valid only for the macro sources it was
+   * linked from. So it is dropped whenever those sources change - including when they change
+   * to none at all: leaving a compile with no macros to run against a session created inside
+   * a relinked compiler crashes it. The key is "" when nothing defines a macro, so that
+   * transition is just another change.
+   */
+  async #syncMacroState(files, packages) {
+    const sourceKey = macroSourceKey(files);
+    if (this.#macroSourceKey !== sourceKey) {
+      this.#compilerModule.resetScala3CompilerSession?.();
+      this.#macroSourceKey = sourceKey;
+      // The artifacts belong to the modules we just dropped; re-register them below.
+      this.#macroArtifacts = null;
+    }
+
+    if (packages.length === 0) {
+      // Say there are none, so a macro-free program fails fast instead of starting a relink.
+      if (this.#macroArtifacts !== "") {
+        this.#compilerModule.setScala3MacroArtifacts([]);
+        this.#macroArtifacts = "";
+      }
+      return;
+    }
+
     await this.#ensureMacroRuntime();
     const key = packages.join(",");
     if (this.#macroArtifacts === key) return;
@@ -207,14 +254,6 @@ export class ScalaToolchain {
       { id: USER_MACRO_ARTIFACT, macroPackages: packages, root: OUTPUT_DIR },
     ]);
     this.#macroArtifacts = key;
-  }
-
-  /** Tell the compiler no macro implementations are available, so it fails fast rather than
-   *  starting a relink loop for a program that has none. */
-  #disarmMacros() {
-    if (this.#macroArtifacts === null || !this.supportsMacros) return;
-    this.#compilerModule.setScala3MacroArtifacts([]);
-    this.#macroArtifacts = null;
   }
 
   /**
@@ -227,11 +266,22 @@ export class ScalaToolchain {
   #ensureMacroRuntime() {
     if (!this.#macroRuntime) {
       this.#macroRuntime = (async () => {
-        const bytes = await fetchBytes(this.compilerIRUrl);
-        const entries = await readZipEntries(bytes, (name) => name.endsWith(".sjsir"));
-        const irFiles = entries
-          .sort((left, right) => left.name.localeCompare(right.name))
-          .map((entry) => this.#compilerModule.makeScala3IRInput(`/compiler-ir/${entry.name}`, entry.bytes));
+        // Linking a second compiler takes about a minute, once per page. Say so.
+        this.onProgress("macros");
+
+        // The archive is kept; the IR inflated out of it is not. Inflated, it is several
+        // times the 22 MB on the wire, and it is needed only when a macro is relinked -
+        // which the linked-compiler cache makes rare. Holding it between relinks cost more
+        // memory than a browser tab has to spare, and took the renderer down with it.
+        let archive = null;
+        const bytes = async () => (archive ??= await fetchBytes(this.compilerIRUrl));
+        const irFiles = async () => {
+          const entries = await readZipEntries(await bytes(), (name) => name.endsWith(".sjsir"));
+          return entries
+            .sort((left, right) => left.name.localeCompare(right.name))
+            .map((entry) => this.#compilerModule.makeScala3IRInput(`/compiler-ir/${entry.name}`, entry.bytes));
+        };
+
         await this.#compilerModule.installScala3MacroRuntimeAsync(bytes, irFiles, this.jszipWrapperUrl);
       })().catch((error) => {
         // A failed install must not poison every later compile: let the next one retry.
@@ -288,6 +338,7 @@ export class ScalaToolchain {
       versionMismatch: Boolean(manifestHostVersion && manifestHostVersion !== HOST_VERSION),
       supportsWasmTarget: this.supportsWasmTarget,
       supportsMacros: this.supportsMacros,
+      structuredDiagnostics: this.structuredDiagnostics,
       warmCompiles: this.warmCompiles,
       incrementalLinking: this.incrementalLinking,
       missingExports,
@@ -418,6 +469,40 @@ export class ScalaToolchain {
   }
 }
 
+/**
+ * Adapt the compiler's structured compile result to this runtime's diagnostic shape.
+ *
+ * The compiler counts lines from zero, as dotty does internally; every consumer of this
+ * runtime counts them from one, because that is what the compiler's own console output and
+ * every editor show. Columns are zero-based on both sides. Converting here means exactly one
+ * place in the system knows that, instead of each caller guessing.
+ */
+function structuredCompilation(result) {
+  const line = (value) => (typeof value === "number" ? value + 1 : null);
+  const column = (value) => (typeof value === "number" ? value : null);
+
+  const diagnostics = [...(result.diagnostics ?? [])].map((diagnostic) => ({
+    severity: diagnostic.severity,
+    code: diagnostic.code ?? null,
+    name: diagnostic.name ?? null,
+    file: diagnostic.file ?? null,
+    line: line(diagnostic.line),
+    column: column(diagnostic.column),
+    endLine: line(diagnostic.endLine),
+    endColumn: column(diagnostic.endColumn),
+    message: diagnostic.message,
+    // The full console-style rendering, which callers show verbatim.
+    text: diagnostic.rendered ?? diagnostic.message,
+  }));
+
+  return {
+    exitCode: result.exitCode,
+    diagnostics,
+    errorCount: result.errorCount ?? diagnostics.filter((d) => d.severity === "error").length,
+    warningCount: result.warningCount ?? diagnostics.filter((d) => d.severity === "warning").length,
+  };
+}
+
 export class UnsupportedRuntimeError extends Error {
   constructor(missing) {
     super(
@@ -471,6 +556,10 @@ export function findEntryPoints(irPaths) {
       const leftIsMain = left.mainClass === "Main" || left.mainClass.endsWith(".Main");
       const rightIsMain = right.mainClass === "Main" || right.mainClass.endsWith(".Main");
       if (leftIsMain !== rightIsMain) return leftIsMain ? -1 : 1;
+      // A `@main` method is a declared entry point; an object is inferred from the fact that
+      // `X$.sjsir` exists, which is also true of every object that is not one. Rank the
+      // certain ahead of the guessed, so that taking the first is never absurd.
+      if (left.kind !== right.kind) return left.kind === "topLevelMain" ? -1 : 1;
       return left.mainClass.localeCompare(right.mainClass);
     });
 }
@@ -487,12 +576,20 @@ export function selectEntryPoint(entryPoints) {
   const main = entryPoints.find(
     (entry) => entry.mainClass === "Main" || entry.mainClass.endsWith(".Main"),
   );
-  const chosen = main ?? (entryPoints.length === 1 ? entryPoints[0] : null);
+
+  // A `@main` method *declares* itself an entry point; an object is only a guess, because
+  // all we can see from emitted IR is that `X$.sjsir` exists - not whether X has a `main`.
+  // So one `@main` among objects is not an ambiguity: it is the only real candidate. This
+  // matters as soon as a program defines a macro, since the macro's own object looks exactly
+  // like a runnable one.
+  const declared = entryPoints.filter((entry) => entry.kind === "topLevelMain");
+  const chosen =
+    main ?? (entryPoints.length === 1 ? entryPoints[0] : declared.length === 1 ? declared[0] : null);
   if (!chosen) {
     return {
       ok: false,
       error: [
-        "Multiple runnable entry points found; name one `Main` or pass one explicitly:",
+        "Multiple runnable entry points found; name one `Main`, mark one `@main`, or pass one explicitly:",
         ...entryPoints.map((entry) => `- ${entry.mainClass}`),
       ].join("\n"),
     };

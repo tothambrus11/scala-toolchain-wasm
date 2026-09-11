@@ -14,10 +14,11 @@ are not.
 input, not a compile-time classpath. The committed demo assets in the fork were produced from
 a different build state and *do* contain classfiles, which is why the demo works and a fresh
 build does not.
-**Fix:** package `compiler/target/scala3-compiler-sjs/node-libs/scala-lib` instead — the merged
-library class directory (3,658 `.class` + 941 `.tasty`), which is what the upstream
-Node-hosted test already uses. The build hard-fails if `Predef.tasty` is not in it.
-**Upstreamable:** yes, and it should be. This is a plain bug.
+**Fix:** ~~package `node-libs/scala-lib` ourselves~~ — **gone as of the move to
+`univalence-xyz/scala3-on-wasm`**, which stages a jar carrying `.class`, `.tasty` *and*
+`.sjsir`. We take theirs and assert `scala/Predef.tasty` is in it, because a silent regression
+here is a baffling failure three layers away.
+**Upstreamable:** it *was* a plain bug, and upstream fixed it.
 
 ## 2. JSZip is replaced, not vendored
 
@@ -74,10 +75,14 @@ bytes arrive.
 **Where:** `host/src/diagnostics.js`
 **Cause:** the compiler has no structured reporter across the Wasm boundary; it prints
 `-- [E007] Type Mismatch Error: /workspace/Main.scala:3:18 ...` to `console.log`.
-**Fix:** capture `console` around the call and parse the standard Scala 3 diagnostic format
-into `{severity, code, file, line, column, message, text}`.
-**Upstreamable:** yes, and it is the highest-value one after #1 — a structured reporter would
-delete this file and stop the format from being a silent API.
+**Fix:** ~~capture `console` and parse the rendered format~~ — **superseded**. The pinned
+fork's `compileScala3SjsAsync` returns `{exitCode, hasErrors, errorCount, warningCount,
+diagnostics}`, each diagnostic carrying severity, code, name, message and a full *range*,
+ANSI-stripped, with absent values as `null` rather than `undefined` so they survive
+`postMessage`. `host/src/diagnostics.js` remains only for the stateless entry point used in
+A/B measurement, which still reports through `console`.
+**Upstreamable:** upstream did it. This was the highest-fragility thing we owned, because a
+rendering format nobody agreed to was load-bearing.
 
 ## 7. Errors crossing the Wasm boundary are not always `Error`s
 

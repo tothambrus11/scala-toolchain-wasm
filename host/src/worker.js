@@ -9,7 +9,7 @@
  * Responses: {id, type: "result", value} | {id, type: "error", error}
  * Events:    {type: "progress", stage} | {id, type: "stdout", chunk}
  */
-import { ScalaToolchain, captureConsole } from "./toolchain.js";
+import { ScalaToolchain, captureConsole, selectEntryPoint } from "./toolchain.js";
 import { createLinkedModuleURL, linkedSize } from "./module-loader.js";
 
 let toolchainPromise = null;
@@ -118,13 +118,15 @@ const handlers = {
     const summary = summarizeCompilation(compilation);
     if (!compilation.ok) return { ...summary, ran: false };
 
-    const entry = request.mainClass ?? compilation.entryPoints[0]?.mainClass;
+    // Not `entryPoints[0]`: that silently picks whatever sorts first, which for a program
+    // defining a macro is the macro's own object - linked as the entry point, it fails at
+    // run time with nothing to explain why. `selectEntryPoint` prefers a declared `@main`
+    // and says so when the choice is genuinely ambiguous.
+    let entry = request.mainClass;
     if (!entry) {
-      return {
-        ...summary,
-        ran: false,
-        error: "No runnable entry point found. Define `object Main` or a top-level `@main` method.",
-      };
+      const selection = selectEntryPoint(compilation.entryPoints);
+      if (!selection.ok) return { ...summary, ran: false, error: selection.error };
+      entry = selection.mainClass;
     }
 
     const target = request.target === "wasm" ? "wasm" : "js";

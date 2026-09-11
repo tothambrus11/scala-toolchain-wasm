@@ -7,7 +7,7 @@ document whenever the pinned fork moves.
 ## The one that matters most
 
 The real dependency is not any file here — it is
-[`pgilliar/scala3-compiler-sjs`](https://github.com/pgilliar/scala3-compiler-sjs), a **research
+[`univalence-xyz/scala3-on-wasm`](https://github.com/univalence-xyz/scala3-on-wasm), a **research
 fork of dotty** that cross-compiles the compiler with Scala.js. Everything else in this
 repository is small; that is not. If the fork stops tracking dotty, this project is pinned to
 an ageing Scala.
@@ -25,16 +25,18 @@ Three ways out, in order of preference:
 Meanwhile, everything below is written so the fork can move without conflicts: our compiler-side
 code is *added* to its source path, never patched.
 
-The fork's next branch, `macro`, is a **migration rather than an upgrade**: it builds with our
-sources unchanged and passes conformance, but its macro support runs through a host-side relink
-protocol we do not implement, and taking it without that would turn today's clean
-"macros are not supported" error into a crash. [fork.md](fork.md) records the trial build and
-the measurements. Two items fall out of it:
+Both of those moves are **done**: the pin is now `js-3.8.3` on
+`univalence-xyz/scala3-on-wasm`, macros expand in the browser, and the compiler bundle is
+11 MB rather than 31.7 MB because that fork links it fully optimized. What was a table of
+things to consider is now history, kept only as the shape of the next such decision:
 
-| What | Disposition | Notes |
+| What | Was | Outcome |
 | --- | --- | --- |
-| Macro support | **Adopt, deliberately** | Needs our host to answer the compiler's missing-entry-point interrupt: relink the macro's `.sjsir`, publish it as a module URL, `import()` it, restart the compile. The largest language-level gap we have. |
-| `fullLinkJS` for the compiler bundle | **Measure, then probably adopt** | The `macro` branch links fully-optimized and ships 11 MB of Wasm against our 31.7 MB. It is a two-line change to the upstream build, but it costs build time and may cost compile speed. A/B it first. |
+| Macro support | "Adopt, deliberately" | Adopted. Our host answers the compiler's missing-entry-point interrupt; the relink loop itself is upstream's. |
+| `fullLinkJS` for the compiler bundle | "Measure, then probably adopt" | Came free with the pin. Compiles got *faster*, not slower - the 30% regression the trial suggested was noise on a loaded machine, which is why it needed measuring rather than believing. |
+
+One thing did not come free, and is open: in a page that has already run many compiles, the
+compile after a macro compile traps. See [fork.md](fork.md).
 
 ## Compiler-side (Scala)
 

@@ -31,7 +31,7 @@ way to build an arbitrary upstream commit via the `upstream_ref` input.
 The upstream commit is pinned in `scripts/build.sh`:
 
 ```bash
-UPSTREAM_REF="357051c857d4ffd5d1e1bfc9a56f0cbf5943a325"
+UPSTREAM_REF="8fdbb99d312de6935bb7482624245caafac27b66"
 ```
 
 To move it:

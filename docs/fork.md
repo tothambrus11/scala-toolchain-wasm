@@ -92,4 +92,5 @@ The same sequence from a fresh page - macro compile, then a plain compile, then 
 passes every time, so this needs an accumulation of prior work to appear. The conformance
 suite runs its macro cases last for this reason, which keeps the suite green without pretending
 the problem is solved; a long editing session that then meets a macro can presumably still hit
-it. Unresolved, and worth reporting upstream with a minimal reproduction.
+it. Unresolved. [`reports/macro-followup-trap.md`](../reports/macro-followup-trap.md) writes it
+up for upstream, including what does *not* cause it.

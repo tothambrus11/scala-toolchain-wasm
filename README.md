@@ -88,7 +88,7 @@ npm test                  # conformance tests in headless Chromium
 scripts/package-dist.sh   # release tarballs
 ```
 
-The build clones a pinned commit of [`pgilliar/scala3-compiler-sjs`](https://github.com/pgilliar/scala3-compiler-sjs)
+The build clones a pinned commit of [`univalence-xyz/scala3-on-wasm`](https://github.com/univalence-xyz/scala3-on-wasm)
 — a fork of dotty cross-compiled with Scala.js — copies this repository's `src-sjs/` into it,
 runs the sbt build, and stages the result. Our Scala sources are *added*, never patched, so
 the fork can move forward without merge conflicts.

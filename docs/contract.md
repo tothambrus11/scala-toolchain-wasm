@@ -12,13 +12,13 @@ distribution can be served from any origin, including a CDN.
 {
   "schema": 1,
   "toolchain": {
-    "source": "https://github.com/pgilliar/scala3-compiler-sjs",
-    "ref": "357051c857d4ffd5d1e1bfc9a56f0cbf5943a325",
-    "scalaVersion": "3.8.3-RC3",
+    "source": "https://github.com/univalence-xyz/scala3-on-wasm",
+    "ref": "8fdbb99d312de6935bb7482624245caafac27b66",
+    "scalaVersion": "3.8.3",
     "scalaJSVersion": "1.20.2",
     "buildJdk": "21.0.10",
-    "hostVersion": "0.1.0",
-    "builtAt": "2026-09-10T15:27:18Z"
+    "hostVersion": "0.3.0",
+    "builtAt": "2026-09-11T00:57:52Z"
   },
   "compilerModule": "./compiler/main.js",
   "runtimeIR": "./runtime/runtime-sjsir.zip",

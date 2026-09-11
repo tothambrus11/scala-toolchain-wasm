@@ -17,6 +17,8 @@
  * compiles as the bytes arrive.
  */
 
+import { fetchResponse } from "./net.js";
+
 const CONTENT_TYPES = {
   ".wasm": "application/wasm",
   ".js": "text/javascript",
@@ -50,7 +52,12 @@ export function installCompressedAssetFetch(compressed, resolve) {
     const entry = requested ? entries.get(new URL(requested, self.location.href).href) : undefined;
     if (!entry) return originalFetch(input, init);
 
-    const response = await originalFetch(entry.url, init);
+    // Through the resilient path, not `originalFetch`. This is the compiler module - the
+    // largest single download, and in a private window one that is re-fetched cold on every
+    // visit - and it is requested by the compiler bundle's own loader rather than by us, so
+    // nothing else here can name it or retry it. Left bare, a dropped connection arrives as
+    // "Failed to fetch" with no indication of which of a dozen assets gave up.
+    const response = await fetchResponse(entry.url, init);
     if (!response.ok) return response;
 
     // A host that decompressed it for us (Content-Encoding) leaves nothing to do.

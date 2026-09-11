@@ -2,6 +2,7 @@ import { VirtualFileSystem } from "./memory-fs.js";
 import { installCompressedAssetFetch } from "./compressed-assets.js";
 import { readZipEntries } from "./zip.js";
 import { parseDiagnostics } from "./diagnostics.js";
+import { fetchBytes, fetchJSON } from "./net.js";
 import { macroPackages, macroSourceKey } from "./macros.js";
 
 /**
@@ -9,7 +10,7 @@ import { macroPackages, macroSourceKey } from "./macros.js";
  * manifest's `toolchain.hostVersion` - if it does not, something is serving a mix of two
  * releases, and the symptoms are confusing (missing exports look like missing features).
  */
-export const HOST_VERSION = "0.3.2";
+export const HOST_VERSION = "0.3.3";
 
 /** Exports this runtime needs from the compiler bundle to offer its full feature set. */
 const EXPECTED_EXPORTS = [
@@ -638,61 +639,3 @@ function now() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
-/** Statuses worth trying again: a server or gateway hiccup, a rate limit, a timeout. */
-const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
-
-const RETRY_DELAYS_MS = [250, 1000];
-
-/**
- * Fetch a toolchain asset, saying what failed and trying again when that might help.
- *
- * Two reasons this is not a bare `fetch`. First, a distribution is ~60 MB over the public
- * internet - `rt.jar` alone is 15 MB - so a dropped connection partway through is an ordinary
- * event, not a bug, and one retry usually settles it. Second, `fetch` rejects a network
- * failure with a `TypeError` whose entire message is "Failed to fetch": no URL, no status,
- * nothing to act on. Reading that in a bug report tells you only that something, somewhere,
- * did not load. Every failure here names the asset and what went wrong with it.
- */
-async function fetchAsset(url, read) {
-  let lastError;
-
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
-    if (attempt > 0) {
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS_MS[attempt - 1]));
-    }
-    try {
-      const response = await fetch(url);
-      if (!response.ok) {
-        const error = new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
-        if (!RETRYABLE_STATUS.has(response.status)) {
-          // A 404 will still be a 404 in a second; marked so the catch below re-raises it
-          // rather than sending us round the loop.
-          throw Object.assign(error, { toolchainFetchFatal: true });
-        }
-        lastError = error;
-        continue;
-      }
-      // The body can still fail mid-stream, which is the likeliest failure for the large
-      // assets - so reading it is part of the attempt, not something after it.
-      return await read(response);
-    } catch (error) {
-      // A non-retryable status, already described above.
-      if (error?.toolchainFetchFatal) throw error;
-      lastError = error;
-    }
-  }
-
-  const attempts = RETRY_DELAYS_MS.length + 1;
-  const detail = lastError?.message === "Failed to fetch"
-    ? "the network request failed (no response); the connection may have dropped mid-download"
-    : lastError?.message ?? String(lastError);
-  throw new Error(`Could not load ${url} after ${attempts} attempts: ${detail}`, { cause: lastError });
-}
-
-function fetchJSON(url) {
-  return fetchAsset(url, response => response.json());
-}
-
-async function fetchBytes(url) {
-  return fetchAsset(url, async response => new Uint8Array(await response.arrayBuffer()));
-}

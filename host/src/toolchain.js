@@ -9,7 +9,7 @@ import { macroPackages, macroSourceKey } from "./macros.js";
  * manifest's `toolchain.hostVersion` - if it does not, something is serving a mix of two
  * releases, and the symptoms are confusing (missing exports look like missing features).
  */
-export const HOST_VERSION = "0.3.0";
+export const HOST_VERSION = "0.3.1";
 
 /** Exports this runtime needs from the compiler bundle to offer its full feature set. */
 const EXPECTED_EXPORTS = [

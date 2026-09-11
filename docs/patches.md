@@ -62,8 +62,13 @@ references before importing it.
 
 **Where:** `host/src/compressed-assets.js`, `scripts/package-dist.sh`
 **Cause:** static hosts cap file size — Cloudflare Pages and Workers both refuse anything over
-25 MiB, and `main.wasm` is 31 MB. The usual workaround (upload pre-compressed, declare
+25 MiB, and `main.wasm` was 31 MB. The usual workaround (upload pre-compressed, declare
 `Content-Encoding: gzip`) fails there too: Cloudflare strips that header from `_headers`.
+**Still needed?** Strictly, no longer: the fork we pin links its compiler fully optimized, so
+`main.wasm` is 11 MB and the largest file in the distribution is now `compiler-sjsir.zip` at
+21.8 MiB — under the cap, and already compressed. What keeps this is no longer the cap but the
+download: 11 MB becomes 3.2 MB. It has changed from a workaround into an optimization, and
+should be judged as one.
 **Fix:** store `main.wasm.gz`, record the substitution in `manifest.compressed`, and install a
 narrow `fetch` shim for exactly those URLs that pipes the response through
 `DecompressionStream`. Streaming is preserved, so `instantiateStreaming` still compiles as

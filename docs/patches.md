@@ -114,6 +114,21 @@ into a hang.
 **Fix:** the error describer tries `message`, then `getMessage()`, then a guarded `String`,
 then `JSON.stringify`, then `Object.prototype.toString`.
 
+## 7a. There is exactly one way to link, and it must say so
+
+**Where:** `host/src/toolchain.js`
+**Symptom:** `TypeError: this.#compilerModule.linkScalaJSAsync is not a function`, from a page
+whose compiler bundle is fine.
+**Cause:** `#link` carried a "fallback" for a distribution built without this repository's
+compiler-side sources, calling `linkScalaJSAsync` / `linkScalaJSModuleAsync`. The pinned fork
+exports neither, so the fallback could not fall back — it could only fail, and it fired
+whenever `linkScalaJSSessionAsync` was missing, which in practice means a stale host paired
+with a current compiler.
+**Fix:** deleted. `#link` now refuses up front when the export is absent and names the likely
+cause — a cached copy of an older release — with both version numbers.
+**Lesson:** a fallback to something that does not exist is worse than no fallback. It converts
+a diagnosable "you are running a mixed pair" into a stack trace in the middle of linking.
+
 ## 8. Build environment
 
 `SBT_OPTS=-Xmx10G -Xss8m -XX:MaxMetaspaceSize=1G` — dotty needs both the heap and the deep

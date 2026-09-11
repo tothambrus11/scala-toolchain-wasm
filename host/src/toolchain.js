@@ -10,7 +10,7 @@ import { macroPackages, macroSourceKey } from "./macros.js";
  * manifest's `toolchain.hostVersion` - if it does not, something is serving a mix of two
  * releases, and the symptoms are confusing (missing exports look like missing features).
  */
-export const HOST_VERSION = "0.3.3";
+export const HOST_VERSION = "0.3.4";
 
 /** Exports this runtime needs from the compiler bundle to offer its full feature set. */
 const EXPECTED_EXPORTS = [
@@ -35,7 +35,7 @@ const RUNTIME_IR_DIR = "/runtime";
  *
  * Two things form the contract with the compiler bundle:
  *   - `globalThis.__scala3CompilerSJSHostFS` - the file system it reads and writes
- *   - the module exports `runScala3CompilerSJSAsync` / `linkScalaJSAsync`
+ *   - the module exports `runScala3CompilerSessionAsync` / `linkScalaJSSessionAsync`
  *
  * The compiler reports diagnostics through `console`, so calls are wrapped in a capture.
  */
@@ -402,43 +402,34 @@ export class ScalaToolchain {
     if (target !== "js" && target !== "wasm") {
       throw new TypeError(`link target must be "js" or "wasm", got ${JSON.stringify(target)}`);
     }
-    if (target === "wasm" && !this.supportsWasmTarget) {
+    if (typeof this.#compilerModule.linkScalaJSSessionAsync !== "function") {
+      // Almost always a mixed load: this runtime against a compiler bundle from a different
+      // release. Say that, because "is not a function" sends people looking at their program.
+      const built = this.#manifest.toolchain?.hostVersion ?? "unknown";
       throw new Error(
-        "This toolchain build cannot link to WebAssembly: it has no linkScalaJSSessionAsync export. Rebuild it from scala-toolchain-wasm.",
+        `This toolchain cannot link: the compiler bundle has no linkScalaJSSessionAsync export. ` +
+          `This runtime is ${HOST_VERSION} and the distribution reports ${built}; if they differ, ` +
+          "a cached copy of an older release is being served - reload bypassing the cache.",
       );
     }
 
     const started = now();
-    const incremental = typeof this.#compilerModule.linkScalaJSSessionAsync === "function";
 
-    // With a session, the runtime IR crosses the boundary once per page, not once per link.
-    let allIR = irFiles;
-    if (incremental) {
-      if (!this.#runtimeIRShared) {
-        this.#compilerModule.setScalaJSRuntimeIR(await this.#runtimeIRFiles());
-        this.#runtimeIRShared = true;
-      }
-    } else {
-      allIR = (await this.#runtimeIRFiles()).concat(irFiles);
+    // The runtime IR crosses the boundary once per page, not once per link: it is ~15 MB and
+    // identical every time, so converting and hashing it per link cost more than linking did.
+    if (!this.#runtimeIRShared) {
+      this.#compilerModule.setScalaJSRuntimeIR(await this.#runtimeIRFiles());
+      this.#runtimeIRShared = true;
     }
+    const allIR = irFiles;
 
-    const { result, lines } = await captureConsole(() => {
-      // The incremental linker keeps its state between links, so a re-run does not re-parse
-      // 15 MB of runtime IR. It returns every emitted file for both targets.
-      if (incremental) {
-        return this.#compilerModule.linkScalaJSSessionAsync(allIR, mainClass ?? "", target);
-      }
-      // Fallback: a distribution built without this repository's sources only has the
-      // upstream JavaScript bridges.
-      if (target === "wasm") {
-        throw new Error(
-          "This toolchain cannot link to WebAssembly: it was built without scala-toolchain-wasm's compiler-side sources.",
-        );
-      }
-      return mainClass
-        ? this.#compilerModule.linkScalaJSAsync(allIR, mainClass)
-        : this.#compilerModule.linkScalaJSModuleAsync(allIR);
-    });
+    const { result, lines } = await captureConsole(() =>
+      // The session linker returns every emitted file, for both targets. There is no second
+      // way to link: the fallback that used to live here called `linkScalaJSAsync`, which the
+      // pinned fork does not export, so it could only ever fail as "is not a function" - the
+      // opposite of a fallback. `#link` refuses above when the export is missing.
+      this.#compilerModule.linkScalaJSSessionAsync(allIR, mainClass ?? "", target),
+    );
 
     const files = result.files
       ? [...result.files].map((file) => ({ name: file.name, bytes: file.bytes }))
@@ -447,7 +438,6 @@ export class ScalaToolchain {
 
     return {
       target,
-      incremental,
       jsFileName: result.jsFileName,
       // JavaScript output is consumed as source; WebAssembly as a set of files.
       code: target === "wasm" ? null : (result.code ?? (entry ? new TextDecoder().decode(entry.bytes) : null)),
